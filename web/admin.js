@@ -216,10 +216,13 @@ function statCard(n, l) {
 const lastCounts = { reports: 0, abuse: 0 };
 
 // Mirrors the builder's kill switch: green or red state, and a button whose colour follows
-// what it will do rather than what is true now.
+// what it will do rather than what is true now. The state is held here rather than read back
+// out of the rendered word, which tied the switch to its own wording.
+let killPaused = false;
 function renderKill(paused) {
+	killPaused = paused;
 	const st = $('#kill-state');
-	st.textContent = paused ? 'disabled' : 'enabled';
+	st.textContent = paused ? 'DISABLED' : 'ENABLED';
 	st.className = 'fw-bold ' + (paused ? 'text-danger' : 'text-success');
 	const b = $('#kill-btn');
 	b.textContent = paused ? 'Enable submissions' : 'Disable submissions';
@@ -228,7 +231,7 @@ function renderKill(paused) {
 }
 
 async function toggleKill() {
-	const paused = $('#kill-state').textContent === 'disabled';
+	const paused = killPaused;
 	$('#kill-btn').disabled = true;
 	try {
 		const r = await fetch(`${API}/admin/pause?state=${paused ? 'off' : 'on'}`, {
