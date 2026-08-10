@@ -223,8 +223,8 @@ Only *successful* submissions are recorded. Refused ones stay in the ephemeral l
 because writing a row per refusal would turn a flood into database writes against your
 100k/day.
 
-Alongside the address, the two-letter origin the edge already supplies. Nothing else is
-kept: no ASN, no user agent, no headers. Look records up with an admin credential:
+Nothing else is kept: no ASN, no user agent, no headers. Look records up with an admin
+credential:
 
 ```sh
 curl -H "Authorization: Bearer $SESSION" "$BIN/admin/abuse?ip=203.0.113.7"
