@@ -23,6 +23,12 @@
   <link href="vendor/bootstrap-icons.min.css" rel="stylesheet">
   <link href="vendor/montserrat.css" rel="stylesheet">
   <style>
+    /* Not from the builder: reserve the scrollbar gutter whether or not the page scrolls.
+       margin:0 auto centres in what the scrollbar leaves, so a page short enough not to
+       scroll centres in 15px more width and lands 7.5px right of one that does. The
+       builder's admin page is long enough to scroll and this one is not, so without this
+       the two sat 7.5px apart. */
+    html { scrollbar-gutter:stable; }
     /* Copied verbatim from thingino-image-builder/web/admin.html so this reads as the
        same application rather than a lookalike. */
     :root { --bs-font-sans-serif:"Montserrat",sans-serif; }
