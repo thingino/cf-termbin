@@ -1,0 +1,16 @@
+{
+  "name": "cf-termbin",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Diagnostics paste bin for thingino, Cloudflare Workers + D1",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "test": "node tests/unit.mjs && tests/smoke.sh",
+    "test:web": "tests/web.sh"
+  },
+  "devDependencies": {
+    "wrangler": "^4.0.0"
+  }
+}

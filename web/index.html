@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="en" data-bs-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <!-- Don't cache the page shell, so a redeploy is picked up without a hard reload.
+       GitHub Pages ignores these (it serves max-age=600); vendor/ is content-stable
+       so its own caching is fine. -->
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+  <meta name="robots" content="noindex,nofollow">
+  <!-- The bin's API is same-origin now: this page is served from /admin/ on the Worker, so
+       'self' covers every call to it. The one remaining cross-origin call is the builder's
+       login endpoint, named exactly rather than covered by a *.workers.dev wildcard, which
+       would have permitted any Worker on the platform. A deployment whose builder lives
+       elsewhere edits this one origin; a token-mode or no-admin deployment can delete it. -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self' https://thingino-image-builder-1d2e9b23.thingino.workers.dev; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <title>thingino · Diagnostics Bin Admin</title>
+  <!-- The same pair the image builder ships, copied not linked: this site is served from a
+       different origin, and the CSP allows img-src 'self' only. -->
+  <link rel="icon" type="image/svg+xml" href="favicon.svg">
+  <link rel="icon" type="image/x-icon" href="favicon.ico">
+  <link href="vendor/bootstrap.min.css" rel="stylesheet">
+  <link href="vendor/bootstrap-icons.min.css" rel="stylesheet">
+  <link href="vendor/montserrat.css" rel="stylesheet">
+  <style>
+    /* Copied verbatim from thingino-image-builder/web/admin.html so this reads as the
+       same application rather than a lookalike. */
+    :root { --bs-font-sans-serif:"Montserrat",sans-serif; }
+    body { min-height:100vh; background:#0d1117; }
+    .card-title { color:darkorange !important; }
+    code { color:darkorange; font-size:.85em; }
+    /* Two different things that both happen to be code in a cell. The address filters the
+       table, so it takes the builder's orange treatment; Bootstrap ships
+       `a>code{color:inherit}` which would otherwise make it link-blue, so that is overridden
+       for this class only. The slug is a real link to a report and is left blue on purpose:
+       if everything is orange there is nothing to tell you what is clickable. */
+    a.ipc > code { color:darkorange; }
+    a.ipc:hover > code { color:#ff9e2c; }
+    .btn-thingino { background:#ff8c00; border-color:#ff8c00; color:#0d1117; font-weight:600; }
+    .btn-thingino:hover, .btn-thingino:focus { background:#ff9e2c; border-color:#ff9e2c; color:#0d1117; }
+    .muted { color:#8b949e !important; }
+    .table > :not(caption) > * > * { background:transparent; }
+    th { color:#8b949e; font-weight:600; white-space:nowrap; }
+    td { white-space:nowrap; vertical-align:middle; }
+    .statn { font-size:1.35rem; font-weight:600; font-variant-numeric:tabular-nums; line-height:1.2; }
+    /* Confirmation popover, copied from the builder so a destructive row action asks where the
+       pointer already is rather than at the top of the window. Fixed positioning, so it needs
+       no scroll maths; admin.js keeps it on its anchor. */
+    .cpop { position:fixed; z-index:1080; max-width:min(20rem,calc(100vw - 1rem)); background:#161b22;
+            border:1px solid #30363d; border-radius:.5rem; box-shadow:0 8px 24px rgba(0,0,0,.5);
+            padding:.55rem .65rem; font-size:.8rem; line-height:1.4; color:#dee2e6; }
+    .cpop-row { display:flex; align-items:center; gap:.4rem; margin-top:.45rem; }
+    .cpop-msg { padding-inline-end:1.1rem; }
+    .cpop-x { position:absolute; top:.1rem; inset-inline-end:.2rem; border:0; background:transparent;
+              color:#8b949e; font-size:1rem; line-height:1; padding:.1rem .25rem; cursor:pointer; }
+    .cpop-x:hover { color:#dee2e6; }
+    .cpop::after { content:""; position:absolute; width:9px; height:9px; background:#161b22;
+                   border-left:1px solid #30363d; border-top:1px solid #30363d; transform:rotate(45deg);
+                   top:-5px; left:var(--cpop-arrow,1rem); }
+    .cpop.above::after { top:auto; bottom:-5px; border-left:0; border-top:0;
+                         border-right:1px solid #30363d; border-bottom:1px solid #30363d; }
+  </style>
+</head>
+<body class="p-3">
+
+<div id="gate" style="max-width:420px;margin:8vh auto 0;">
+  <div class="card">
+    <div class="card-header"><h2 class="card-title mb-0 fs-5"><i class="bi bi-shield-lock me-1"></i> Admin</h2></div>
+    <div class="card-body">
+      <p class="small muted" id="gateHint">Sign in with your thingino builder account. The
+      session is issued by the builder and kept in this tab only, never in a cookie.</p>
+      <!-- One form for both credentials, as the builder does it: the master token replaces the
+           username and password, and the 6-digit code is required either way. -->
+      <form id="loginForm">
+        <input class="form-control mb-2" id="u" name="username" placeholder="username" autocomplete="username">
+        <input class="form-control mb-2" id="p" name="password" type="password" placeholder="password" autocomplete="current-password">
+        <input class="form-control mb-2" id="mt" name="master" type="password" placeholder="master token" autocomplete="off" hidden>
+        <input class="form-control mb-3" id="t" name="totp" placeholder="6-digit code" inputmode="numeric" autocomplete="one-time-code">
+        <button type="submit" class="btn btn-thingino w-100" id="signin">Sign in</button>
+      </form>
+      <a href="#" id="masterToggle" class="small muted d-block mt-2">Use master token instead</a>
+      <div id="gateErr" class="alert py-2 small mt-2" style="display:none"></div>
+    </div>
+  </div>
+</div>
+
+<div id="app" style="display:none;max-width:min(1280px,96vw);margin:0 auto;">
+  <div class="d-flex align-items-center mb-3 flex-wrap gap-2">
+    <h1 class="fs-4 mb-0"><i class="bi bi-shield-lock me-1" style="color:darkorange"></i> Thingino Diagnostics Bin Admin</h1>
+    <span class="ms-auto small muted" id="updated"></span>
+    <button class="btn btn-thingino btn-sm" id="refresh">Refresh</button>
+    <button class="btn btn-outline-secondary btn-sm" id="lock">Sign out</button>
+  </div>
+
+  <div id="err" class="alert py-2 small" style="display:none"></div>
+
+  <!-- Same shape as the builder's first card: current state, the switch, then the
+       destructive actions, with a muted note pushed to the right. -->
+  <div class="card mb-3"><div class="card-body d-flex align-items-center gap-3 flex-wrap">
+    <div>Submissions are <span id="kill-state" class="fw-bold">…</span></div>
+    <button id="kill-btn" class="btn btn-sm">…</button>
+    <button id="purgeReports" class="btn btn-sm btn-outline-secondary">Delete all reports</button>
+    <button id="purgeAbuse" class="btn btn-sm btn-outline-secondary">Delete all submission records</button>
+    <span class="small muted ms-auto" id="purgeNote"></span>
+  </div></div>
+
+  <div class="card mb-3">
+    <div class="card-header"><h2 class="card-title fs-6 mb-0"><i class="bi bi-hdd me-1"></i> Storage</h2></div>
+    <div class="card-body"><div class="row g-2" id="stats"></div></div>
+  </div>
+
+  <div class="card mb-3">
+    <div class="card-header"><h2 class="card-title fs-6 mb-0"><i class="bi bi-speedometer2 me-1"></i> Today's budget</h2></div>
+    <div class="card-body"><div class="row g-2" id="budget"></div></div>
+  </div>
+
+  <div class="card mb-3">
+    <div class="card-header"><h2 class="card-title fs-6 mb-0"><i class="bi bi-file-earmark-text me-1"></i> Reports</h2></div>
+    <div class="card-body p-0"><div class="table-responsive" style="max-height:320px;overflow:auto;">
+      <!-- Same classes, same bounded scrolling body and same muted note under the table as
+           the builder's recent-builds card, so the two read as one application. -->
+      <table class="table table-sm table-dark mb-0 small" id="reports"><thead><tr>
+        <th>slug</th><th>kind</th><th>size</th><th>age</th><th>expires</th><th></th>
+      </tr></thead><tbody></tbody></table>
+    </div>
+    <div class="small muted mt-1 px-3 pb-2">Reports open in a new tab and are served as inert
+    plain text. This page never renders report contents.</div></div>
+  </div>
+
+  <div class="card mb-3">
+    <div class="card-header d-flex align-items-center gap-2 flex-wrap">
+      <h2 class="card-title fs-6 mb-0"><i class="bi bi-person-badge me-1"></i> Submissions</h2>
+      <form id="findForm" class="d-flex gap-2 ms-auto">
+        <input class="form-control form-control-sm" id="ip" placeholder="filter by address" autocomplete="off" style="min-width:14rem">
+        <button type="submit" class="btn btn-sm btn-outline-secondary">Find</button>
+      </form>
+    </div>
+    <div class="card-body p-0"><div class="table-responsive" style="max-height:320px;overflow:auto;">
+      <table class="table table-sm table-dark mb-0 small" id="abuse"><thead><tr>
+        <th>address</th><th>slug</th><th>kind</th><th>at</th><th>record expires</th>
+      </tr></thead><tbody></tbody></table>
+    </div>
+    <div class="small muted mt-1 px-3 pb-2" id="abuseNote"></div></div>
+  </div>
+
+</div>
+
+<!-- The footer every thingino web app shares: mt-2, centered, muted, the repo NAME as
+     the link, then "v<version>-<short sha>" as a plain span so it inherits .muted
+     rather than code's darkorange. Outside #gate/#app so it shows whether or not anyone
+     is signed in. -->
+<p class="mt-2 small text-center muted">
+  <a href="https://github.com/thingino/cf-termbin" target="_blank" rel="noopener" class="link-secondary text-decoration-none">cf-termbin</a>
+  <span id="version-num"></span>
+</p>
+
+<script src="config.js"></script>
+<script src="admin.js"></script>
+</body>
+</html>

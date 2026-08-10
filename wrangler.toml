@@ -1,0 +1,110 @@
+name = "tb"
+main = "src/index.js"
+compatibility_date = "2026-08-01"
+
+# Preview URLs are off deliberately: they expose per-version hostnames serving older builds
+# of this Worker, so a fix to the gate could be sidestepped by requesting a previous version.
+workers_dev = true
+preview_urls = false
+
+# Report bodies live as a BLOB column. An object store would be the more natural home
+# for a blob, but every option needs a payment method this account does not have, and
+# D1 does not. The constraint it brings is 500 MB per database on the free plan, which
+# is what DAILY_MAX_BYTES below exists to respect.
+[[d1_databases]]
+binding = "DB"
+database_name = "thingino-diag"
+database_id = "8058800d-6812-4ffd-8814-d3c481a4c721"
+
+# The image builder's database, for authentication only. Nothing here writes to it:
+# an account in the builder is an account here, and revoking there revokes here. See
+# src/auth.js for why login is delegated rather than reimplemented.
+[[d1_databases]]
+binding = "AUTHDB"
+database_name = "thingino-builder"
+database_id = "6a4691c0-2a43-408f-9954-f01e585f8b5d"
+
+# Global daily write counter, in bytes as well as reports. Bounds the database
+# under D1's 500 MB free-plan ceiling without having to query its size.
+[[durable_objects.bindings]]
+name = "BUDGET"
+class_name = "DailyBudget"
+
+# SQLite is the only Durable Object storage backend on the Workers free plan.
+# Using new_classes here instead would silently require a paid plan.
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["DailyBudget"]
+
+# Reclaims expired rows. Read-time expiry is authoritative, so this only frees
+# storage and is safe to lag.
+[triggers]
+crons = ["*/15 * * * *"]
+
+# Analytics Engine is left unbound: the account token has no Analytics permission,
+# and it was always optional. The code guards env.AE, so re-enabling it is this
+# block plus Account Analytics:Read on the token, with no code change:
+#
+#   [[analytics_engine_datasets]]
+#   binding = "AE"
+#   dataset = "thingino_diag"
+
+[vars]
+# Where the admin portal is published. The Worker fetches it and serves it at /admin/ on
+# this origin, so the page and the API are same-origin: the page needs no CORS grant and
+# its CSP needs no wildcard for a cross-origin API. The path is the repository name, which
+# is how GitHub Pages project sites work. Empty means no portal, and /admin/ 404s.
+PORTAL_UPSTREAM = "https://thingino.github.io/cf-termbin"
+# Empty on purpose. CORS is only needed by a portal on some OTHER origin; the one above is
+# same-origin, so no preflight is answered and no CORS header is emitted. Set it to an exact
+# origin if you host the portal yourself somewhere else. Never a wildcard.
+ALLOW_ORIGIN = ""
+SLUG_LEN = "8"                 # 40 bits; sized by hit density, see src/slug.js
+# 512 KiB. The largest report measured on a real device is 410,747 bytes, so this is 27%
+# headroom. It also bounds the shape scan, which is the expensive part of a submission: the
+# edge reports 47 ms of CPU for a 410 KB body and 61 ms at this cap, both fine. Note those are
+# the EDGE numbers from `wrangler tail`, about 8x what the same scan measures locally, and the
+# real per-invocation ceiling has not been established beyond "above 61 ms".
+# The device uploader trims to the same number; raising one without the other produces a
+# report that is trimmed and then refused anyway.
+MAX_BYTES = "524288"
+TTL_DAYS = "3"
+MAX_TTL_DAYS = "3"
+DAILY_MAX = "2000"             # report count, secondary guard
+DAILY_MAX_BYTES = "104857600"  # 100 MB/day, so 300 MB steady state at 3 days
+PASTE_TTL_DAYS = "1"           # anything that is not a recognised report expires sooner
+PASTE_DAILY_MAX = "200"        # and get their own, smaller allowance
+PASTE_DAILY_MAX_BYTES = "20971520"
+# Every submission must present this in X-Thingino-Client, matched as a prefix. For
+# thingino it is the CPE_NAME already in /etc/os-release, which is public by design; a
+# self-hosted deployment should use a random string it does not publish.
+CLIENT_ID = "cpe:/o:thinginoproject:thingino"
+REQUIRE_ENVELOPE = "0"         # 1 = refuse anything that is not a recognised report
+SHAPE_BLOB_PCT = "10"          # reject if more than this share of the body sits in tokens that
+                               # look encoded. Real device output measures under 2.4% and
+                               # mostly zero; a payload measures a third of it upwards
+# Section counts vary by firmware version AND by what worked on the device, because
+# the producing tool emits a header only when its command made output. Measured across the
+# lab: 30 sections on a T31X, 24 on a T40N, 23 on a T21N, and 5 when only the unconditional
+# headers survive. So the count is just a floor against a bare wrapper; the check that
+# carries the meaning is the number of RECOGNISED section names, which a hand-made envelope
+# cannot fake without reproducing the real thing.
+SHAPE_MIN_SECTIONS = "3"
+SHAPE_MIN_KNOWN_SECTIONS = "2" # real reports clear this by 10x; a fake wrapper has 1
+BLOCK_DROPPERS = "1"           # 0 disables the fetch-and-run checks if one ever false-fires
+ABUSE_TTL_DAYS = "7"           # submitter address kept this long for abuse
+                               # follow-up, in its own table so it outlives the
+                               # report it points at
+RECLAIM_BATCH = "50"           # rows per cron tick, keeps DELETE under 30s
+PUBLIC_BASE = ""               # empty means derive from the request origin
+
+# Admin auth has three modes, inferred unless AUTH_MODE is set:
+#
+#   builder  an AUTHDB binding is present  -> accounts in thingino-image-builder
+#   token    an ADMIN_KEY secret is set    -> one shared secret (self-hosting)
+#   none     neither                       -> no admin; reports still expire, and
+#                                             submitters keep their delete tokens
+#
+# This deployment is `builder`. For `token`:  wrangler secret put ADMIN_KEY
+# For `none`: drop the [[d1_databases]] AUTHDB block above and set no ADMIN_KEY.
+
