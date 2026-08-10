@@ -25,21 +25,20 @@ let key = sessionStorage.getItem(KEY) || '';
 const fmtBytes = (n) =>
 	n < 1024 ? n + ' B' : n < 1048576 ? (n / 1024).toFixed(1) + ' KiB' : (n / 1048576).toFixed(2) + ' MiB';
 
-const ago = (iso) => {
-	const s = (Date.now() - new Date(iso)) / 1000;
-	if (s < 90) return Math.round(s) + 's ago';
-	if (s < 5400) return Math.round(s / 60) + 'm ago';
-	if (s < 172800) return Math.round(s / 3600) + 'h ago';
-	return Math.round(s / 86400) + 'd ago';
-};
+// Always 24 hour and zero padded, which is the one place these deliberately part company with
+// the builder: it passes no options, so an en-US viewer gets 1:41:41 AM there. `hourCycle` and
+// not `hour12:false`, because that is defined as the locale's preferred 24 hour cycle and so
+// can render midnight as 24:00:12; h23 pins the hour to 00-23. Locale still decides field
+// order, so a date stays dd/mm in en-GB and mm/dd in en-US.
+const HMS = { hourCycle: 'h23', hour: '2-digit', minute: '2-digit', second: '2-digit' };
+const YMD = { year: 'numeric', month: '2-digit', day: '2-digit' };
 
-const until = (iso) => {
-	const s = (new Date(iso) - Date.now()) / 1000;
-	if (s < 0) return 'expired';
-	if (s < 5400) return 'in ' + Math.round(s / 60) + 'm';
-	if (s < 172800) return 'in ' + Math.round(s / 3600) + 'h';
-	return 'in ' + Math.round(s / 86400) + 'd';
-};
+// A clock time rather than an age, following the builder's recent events column.
+const tfmt = (iso) => new Date(iso).toLocaleTimeString([], HMS);
+
+// Date and time, for the columns that can land on another day: a report lives 3 days and a
+// submission record 7, so "in 5d" alone never says which day it falls on.
+const stamp = (iso) => new Date(iso).toLocaleString([], { ...YMD, ...HMS });
 
 function show(el, msg, warn) {
 	el.textContent = msg || '';
@@ -285,8 +284,8 @@ async function loadReports() {
 		codeLink(cell(tr, ''), r.slug, API + '/' + r.slug, { blank: true });
 		cell(tr, r.kind || '?');
 		cell(tr, fmtBytes(r.size), true);
-		cell(tr, ago(r.at));
-		cell(tr, until(r.expires));
+		cell(tr, stamp(r.at));
+		cell(tr, stamp(r.expires));
 		// A link, not a button: same action, and it is what keeps the row the height of the
 		// builder's rows rather than a button's.
 		const td = document.createElement('td');
@@ -329,8 +328,12 @@ async function loadAbuse(ip) {
 		tb.appendChild(tr);
 		return;
 	}
+	// Column order follows the builder's recent events: when, what, which one, who.
 	for (const r of d.submissions) {
 		const tr = document.createElement('tr');
+		cell(tr, tfmt(r.at));
+		cell(tr, r.kind || '?');
+		cell(tr, r.slug, true);
 		const td = cell(tr, '');
 		if (r.country) {
 			const g = document.createElement('span');
@@ -344,10 +347,7 @@ async function loadAbuse(ip) {
 			$('#ip').value = r.ip;
 			loadAbuse(r.ip);
 		};
-		cell(tr, r.slug, true);
-		cell(tr, r.kind || '?');
-		cell(tr, ago(r.at));
-		cell(tr, until(r.record_expires));
+		cell(tr, stamp(r.record_expires));
 		tb.appendChild(tr);
 	}
 }

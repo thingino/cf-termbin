@@ -126,7 +126,7 @@
       <!-- Same classes, same bounded scrolling body and same muted note under the table as
            the builder's recent-builds card, so the two read as one application. -->
       <table class="table table-sm table-dark mb-0 small" id="reports"><thead><tr>
-        <th>slug</th><th>kind</th><th>size</th><th>age</th><th>expires</th><th></th>
+        <th>slug</th><th>kind</th><th>size</th><th>created</th><th>expires</th><th></th>
       </tr></thead><tbody></tbody></table>
     </div>
     <div class="small muted mt-1 px-3 pb-2">Reports open in a new tab and are served as inert
@@ -137,13 +137,13 @@
     <div class="card-header d-flex align-items-center gap-2 flex-wrap">
       <h2 class="card-title fs-6 mb-0"><i class="bi bi-person-badge me-1"></i> Submissions</h2>
       <form id="findForm" class="d-flex gap-2 ms-auto">
-        <input class="form-control form-control-sm" id="ip" placeholder="filter by address" autocomplete="off" style="min-width:14rem">
+        <input class="form-control form-control-sm" id="ip" placeholder="filter by ip" autocomplete="off" style="min-width:14rem">
         <button type="submit" class="btn btn-sm btn-outline-secondary">Find</button>
       </form>
     </div>
     <div class="card-body p-0"><div class="table-responsive" style="max-height:320px;overflow:auto;">
       <table class="table table-sm table-dark mb-0 small" id="abuse"><thead><tr>
-        <th>address</th><th>slug</th><th>kind</th><th>at</th><th>record expires</th>
+        <th>time</th><th>kind</th><th>slug</th><th>ip</th><th>record expires</th>
       </tr></thead><tbody></tbody></table>
     </div>
     <div class="small muted mt-1 px-3 pb-2" id="abuseNote"></div></div>
