@@ -152,6 +152,10 @@ start_dev() {
 	  INSERT OR REPLACE INTO sessions (token, admin, expires, last_active) VALUES ('$(printf '%s' expired-token | sha256sum | cut -d' ' -f1)', 'smoketest', $(( $(date +%s) - 10 )), $(date +%s));
 	  INSERT OR REPLACE INTO sessions (token, admin, expires, last_active) VALUES ('$(printf '%s' idle-token | sha256sum | cut -d' ' -f1)', 'smoketest', $(( $(date +%s) + 28800 )), $(( $(date +%s) - 9000 )));
 	  INSERT OR REPLACE INTO sessions (token, admin, expires, last_active) VALUES ('$(printf '%s' disabled-token | sha256sum | cut -d' ' -f1)', 'gone', $(( $(date +%s) + 28800 )), $(date +%s));
+	  CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL, kind TEXT NOT NULL, build_id TEXT, uid TEXT, ip_bucket TEXT, ip_full TEXT, country TEXT, detail TEXT);
+	  INSERT INTO events (ts, kind, ip_bucket, ip_full, country, detail) VALUES ($(( $(date +%s) - 60 )), 'admin_login_ok', '203.0.113.0', '203.0.113.7', 'US', 'session created (smoketest)');
+	  INSERT INTO events (ts, kind, ip_bucket, ip_full, country, detail) VALUES ($(( $(date +%s) - 120 )), 'admin_login_fail', '203.0.113.0', '203.0.113.7', 'US', 'bad login (nobody)');
+	  INSERT INTO events (ts, kind, ip_bucket, ip_full, country, detail) VALUES ($(( $(date +%s) - 180 )), 'queued', NULL, NULL, NULL, 'some build, not a login');
 	" >/dev/null 2>&1 || { echo "could not seed the auth database"; exit 1; }
 
 	# PORTAL_UPSTREAM cleared first: wrangler dev reads wrangler.toml, where it points at the
@@ -450,6 +454,16 @@ body_has "and names the report kind and size" '"detail": "diag,'
 check "event log lists recent" 200 -H "Authorization: Bearer ${ADMIN}" "${BASE}/admin/events?limit=5"
 body_has "listing has a count" '"count"'
 body_has "and the total behind it" '"total"'
+# Logins happen at the builder, so they are read from its table rather than invented here.
+check "the log carries builder logins" 200 -H "Authorization: Bearer ${ADMIN}" "${BASE}/admin/events?limit=50"
+body_has "a successful login shows up" '"kind": "admin_login_ok"'
+body_has "with the identity lifted into the admin column" '"admin": "smoketest"'
+body_has "a failed one does too" '"kind": "admin_login_fail"'
+# The attempted username in a failed login's detail is not an identity and must not be shown as
+# one, or a stranger typing "master" would appear to be master.
+body_lacks "but a failed login names nobody as the admin" '"admin": "nobody"'
+# Only the login kinds cross over. The builder's build traffic is its own page's business.
+body_lacks "and no other builder event leaks in" '"kind": "queued"'
 # The total is counted under the same filter as the rows, or "the latest 5 of N" would count
 # rows the filter excluded. One submission by this address, so a filtered total of 1.
 check "filtered total counts only the match" 200 -H "Authorization: Bearer ${ADMIN}" "${BASE}/admin/events?slug=${ABSLUG}"
@@ -713,7 +727,10 @@ body_lacks "the submission rows are gone" "${PSLUG}"
 # The clearing is logged after the deletes, deliberately, so it does not erase the record of
 # itself. One row left, not none.
 body_has "and the clearing logged itself" '"kind": "purge_events"'
-body_has "exactly that one row" '"count": 1'
+# The two seeded logins belong to the builder and are not ours to delete, so they survive: the
+# purge row plus those two.
+body_has "the login trail survives a cleared log" '"kind": "admin_login_ok"'
+body_has "our row plus the builder's two" '"count": 3'
 # The portal proxy must not swallow a DELETE to an API path, and an unknown one still 404s.
 check "purge on an unknown table 404s" 404 -X DELETE -H "Authorization: Bearer ${ADMIN}" "${BASE}/admin/nonsense?confirm=all"
 

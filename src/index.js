@@ -765,6 +765,67 @@ function isClient(request, env) {
 // The point of keeping submitter addresses is being able to answer "who sent this"
 // and "what else did they send". Without a way to ask, the data would be collected
 // for nothing, which is the exact trap of keeping what you do not need.
+// A login happens at the builder, never here: this Worker sees no password and no code, so it
+// has no login of its own to record. Rather than approximate one from "a session showed up",
+// the builder's own rows are read out of the database already bound for auth. Two upshots worth
+// having: clearing this log cannot erase the login trail, since those rows are not ours to
+// delete, and a failed or throttled login against the builder is visible here too.
+const LOGIN_KINDS = ['admin_login_ok', 'admin_login_fail', 'admin_login_throttled'];
+// The builder reaps its events at 7 days (`DELETE FROM events WHERE ts < ts - 7*DAY`). Its rows
+// expire on its clock, not ABUSE_TTL_DAYS, so `record_expires` is honest for them.
+const BUILDER_EVENT_TTL_DAYS = 7;
+
+const ownEvent = (r) => ({
+	ts: r.ts,
+	kind: r.kind,
+	slug: r.slug || null,
+	ip: r.ip || null,
+	country: r.country || null,
+	admin: r.admin || null,
+	detail: r.detail || null,
+	exp: r.exp,
+});
+
+async function loginEvents(env, { ip, slug, limit }) {
+	// A slug can never match a login, so that filter skips the builder entirely.
+	if (!env.AUTHDB || slug) return { rows: [], total: 0 };
+
+	const holes = LOGIN_KINDS.map(() => '?').join(',');
+	const where = `kind IN (${holes})` + (ip ? ' AND ip_full = ?' : '');
+	const args = ip ? [...LOGIN_KINDS, ip] : LOGIN_KINDS;
+
+	try {
+		const got = await env.AUTHDB.prepare(
+			`SELECT ts, kind, ip_full, ip_bucket, country, detail FROM events WHERE ${where} ORDER BY ts DESC LIMIT ?`,
+		)
+			.bind(...args, limit)
+			.all();
+		const n = await env.AUTHDB.prepare(`SELECT COUNT(*) n FROM events WHERE ${where}`).bind(...args).first();
+		return {
+			total: n?.n ?? 0,
+			rows: got.results.map((r) => ({
+				ts: r.ts,
+				kind: r.kind,
+				slug: null,
+				ip: r.ip_full || r.ip_bucket || null,
+				country: r.country || null,
+				// The identity sits inside the builder's own detail text, "session created (master)",
+				// so it is lifted out for the admin column and left null when the format does not
+				// match. Only for a success: a failed login's detail names an attempted username,
+				// which is not an identity and must not be shown as one.
+				admin: r.kind === 'admin_login_ok' ? (/\(([^)]+)\)\s*$/.exec(r.detail || '') || [])[1] || null : null,
+				detail: r.detail || null,
+				exp: r.ts + BUILDER_EVENT_TTL_DAYS * 86400,
+			})),
+		};
+	} catch (err) {
+		// A builder without that table, or a binding that cannot see it. This Worker's own log is
+		// still worth serving, so the page degrades to it rather than answering 500.
+		console.log(`login events unavailable: ${err}`);
+		return { rows: [], total: 0 };
+	}
+}
+
 async function events(request, env, url) {
 	if (!(await adminIdentity(request, env))) return notFound();
 	await ensureSchema(env);
@@ -796,11 +857,18 @@ async function events(request, env, url) {
 	else if (slug) all = await env.DB.prepare('SELECT COUNT(*) n FROM events WHERE slug = ?').bind(slug).first();
 	else all = await env.DB.prepare('SELECT COUNT(*) n FROM events').first();
 
+	const login = await loginEvents(env, { ip, slug, limit });
+
+	// Two separate D1 databases, so no UNION: each side's newest are merged here. V8's sort is
+	// stable and this Worker's own rows come first, so events sharing a second keep the id order
+	// the query already put them in.
+	const merged = [...rows.results.map(ownEvent), ...login.rows].sort((a, b) => b.ts - a.ts).slice(0, limit);
+
 	return jsonResponse(200, {
 		retention_days: num(env.ABUSE_TTL_DAYS, 7),
-		count: rows.results.length,
-		total: all?.n ?? 0,
-		events: rows.results.map((r) => ({
+		count: merged.length,
+		total: (all?.n ?? 0) + login.total,
+		events: merged.map((r) => ({
 			at: new Date(r.ts * 1000).toISOString(),
 			kind: r.kind,
 			slug: r.slug || null,

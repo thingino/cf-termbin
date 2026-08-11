@@ -58,7 +58,7 @@ implementation instead of two that drift.
 
 ```sh
 node tests/unit.mjs   # 111 checks, ~instant
-tests/smoke.sh        # 261 checks over 13 wrangler dev instances
+tests/smoke.sh        # 268 checks over 13 wrangler dev instances
 tests/web.sh          # 21 checks in Chromium, both auth modes
 ```
 
@@ -227,6 +227,12 @@ week. One row per accepted submission, per admin action and per reclaim run:
 | `purge_events` | the log itself is cleared, logged *after* the deletes so it survives |
 | `paused` / `resumed` | the kill switch is used |
 | `reap` | the cron expires something, skipped entirely when it finds nothing |
+
+Admin logins are not in that table, because they do not happen here: this Worker never sees a
+password or a code. In builder mode the listing reads `admin_login_ok`, `admin_login_fail` and
+`admin_login_throttled` out of the builder's own events table, which is already bound for auth,
+and merges them in by time. So clearing this log cannot erase the login trail, and a login
+attempt that never reached this bin is still visible against it.
 
 Only *successful* submissions are recorded. Refused ones stay in the ephemeral log,
 because writing a row per refusal would turn a flood into database writes against your
