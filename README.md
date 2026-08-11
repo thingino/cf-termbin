@@ -57,9 +57,9 @@ implementation instead of two that drift.
 ## Test
 
 ```sh
-node tests/unit.mjs   # 115 checks, ~instant
-tests/smoke.sh        # 202 checks over 9 wrangler dev instances
-tests/web.sh          # 15 checks in Chromium, both auth modes
+node tests/unit.mjs   # 111 checks, ~instant
+tests/smoke.sh        # 261 checks over 13 wrangler dev instances
+tests/web.sh          # 21 checks in Chromium, both auth modes
 ```
 
 The smoke suite covers every route, both gates, the D1 blob round trip at a realistic
@@ -214,22 +214,32 @@ the working set can never exceed the daily byte budget times the retention windo
 what makes storage provably bounded. If a log needs to outlive its window, download it and
 attach it to the issue, where the discussion already lives.
 
-The submitter's address is kept for **7 days** (`ABUSE_TTL_DAYS`) for abuse follow-up, in
-a separate `submissions` table rather than on the report row. That is deliberate: the
-abuse window is longer than the retention window, so a column on `pastes` would be
-reclaimed with the report at 3 days and never reach a week.
+An `events` table records what happened, kept for **7 days** (`ABUSE_TTL_DAYS`) and
+separate from the report row on purpose: that window is longer than the retention window,
+so a column on `pastes` would be reclaimed with the report at 3 days and never reach a
+week. One row per accepted submission, per admin action and per reclaim run:
+
+| kind | written when |
+| --- | --- |
+| `submit` | a report is accepted, in the same batch that stores it |
+| `delete` | one report is deleted, naming the admin or the submitter's token |
+| `purge_reports` | every report is deleted at once |
+| `purge_events` | the log itself is cleared, logged *after* the deletes so it survives |
+| `paused` / `resumed` | the kill switch is used |
+| `reap` | the cron expires something, skipped entirely when it finds nothing |
 
 Only *successful* submissions are recorded. Refused ones stay in the ephemeral log,
 because writing a row per refusal would turn a flood into database writes against your
 100k/day.
 
-Nothing else is kept: no ASN, no user agent, no headers. Look records up with an admin
-credential:
+A submitter's address is kept against their submission. An admin action stores who did it
+and no address, so the retention promise above stays about submitters. Nothing else is
+kept: no ASN, no user agent, no headers. Read the log with an admin credential:
 
 ```sh
-curl -H "Authorization: Bearer $SESSION" "$BIN/admin/abuse?ip=203.0.113.7"
-curl -H "Authorization: Bearer $SESSION" "$BIN/admin/abuse?slug=<slug>"
-curl -H "Authorization: Bearer $SESSION" "$BIN/admin/abuse?limit=20"
+curl -H "Authorization: Bearer $SESSION" "$BIN/admin/events?ip=203.0.113.7"
+curl -H "Authorization: Bearer $SESSION" "$BIN/admin/events?slug=<slug>"
+curl -H "Authorization: Bearer $SESSION" "$BIN/admin/events?limit=20"
 ```
 
 ## Configuration
@@ -256,7 +266,7 @@ curl -H "Authorization: Bearer $SESSION" "$BIN/admin/abuse?limit=20"
 | `SHAPE_MIN_SECTIONS` | `3` | floor against a bare wrapper; real reports run 5 to 30 |
 | `SHAPE_MIN_KNOWN_SECTIONS` | `2` | recognised section names required, which is the check that means something |
 | `BLOCK_DROPPERS` | `1` | `0` disables the fetch-and-run checks if one ever false-fires |
-| `ABUSE_TTL_DAYS` | `7` | how long a submitter address is kept for abuse follow-up |
+| `ABUSE_TTL_DAYS` | `7` | how long an event row, and so a submitter address, is kept |
 | `RECLAIM_BATCH` | `50` | expired rows deleted per cron tick |
 | `PUBLIC_BASE` | `""` | base URL in responses; empty derives from the request |
 

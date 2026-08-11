@@ -33,11 +33,8 @@ const fmtBytes = (n) =>
 const HMS = { hourCycle: 'h23', hour: '2-digit', minute: '2-digit', second: '2-digit' };
 const YMD = { year: 'numeric', month: '2-digit', day: '2-digit' };
 
-// A clock time rather than an age, following the builder's recent events column.
-const tfmt = (iso) => new Date(iso).toLocaleTimeString([], HMS);
-
-// Date and time, for the columns that can land on another day: a report lives 3 days and a
-// submission record 7, so "in 5d" alone never says which day it falls on.
+// Every column is a full date and time. An event log spans days, so a clock alone would leave
+// a row from Tuesday indistinguishable from one an hour old.
 const stamp = (iso) => new Date(iso).toLocaleString([], { ...YMD, ...HMS });
 
 function show(el, msg, warn) {
@@ -212,7 +209,7 @@ function statCard(n, l) {
 
 // What the last stats load reported, so a confirm prompt can name a number instead of
 // asking about an unspecified "all".
-const lastCounts = { reports: 0, abuse: 0 };
+const lastCounts = { reports: 0, events: 0 };
 
 // Mirrors the builder's kill switch: green or red state, and a button whose colour follows
 // what it will do rather than what is true now. The state is held here rather than read back
@@ -248,7 +245,7 @@ async function toggleKill() {
 async function loadStats() {
 	const s = await api('/admin/stats');
 	lastCounts.reports = s.reports.total;
-	lastCounts.abuse = s.abuse.records;
+	lastCounts.events = s.events.records;
 	renderKill(Boolean(s.budget.paused));
 	const c = $('#stats');
 	c.replaceChildren(
@@ -256,7 +253,7 @@ async function loadStats() {
 		statCard(fmtBytes(s.reports.bytes), 'report bytes'),
 		statCard(fmtBytes(s.database.bytes), 'database size'),
 		statCard(s.database.percent_of_limit + '%', 'of 500 MiB'),
-		statCard(s.abuse.records, 'abuse records'),
+		statCard(s.events.records, 'events logged'),
 	);
 	const b = $('#budget');
 	b.replaceChildren();
@@ -267,8 +264,38 @@ async function loadStats() {
 	}
 }
 
+// Each table shows a short page by default with the builder's expand link under it. Session
+// only, exactly as there: a reload returns to the short page rather than re-fetching hundreds
+// of rows on every poll.
+const PAGE = { reports: 25, events: 60 };
+// The Worker clamps ?limit to this, so "show all" cannot mean more than it and the line stays
+// honest about that: past it, expanding reads "the latest 500 of 627".
+const MAX_PAGE = 500;
+const showAll = { reports: false, events: false };
+const pageLimit = (which) => (showAll[which] ? MAX_PAGE : PAGE[which]);
+
+// "showing the latest 25 of 144 kept (3 days)", plus the toggle when there is more to see.
+function moreLine(el, which, shown, total, kept) {
+	el.replaceChildren();
+	el.appendChild(document.createTextNode(`showing the latest ${shown} of ${total} kept (${kept})`));
+	if (total <= shown && !showAll[which]) return;
+	el.appendChild(document.createTextNode(' '));
+	const a = document.createElement('a');
+	a.href = '#';
+	a.textContent = showAll[which] ? 'show less' : 'show all';
+	a.onclick = (e) => {
+		e.preventDefault();
+		showAll[which] = !showAll[which];
+		const again = which === 'reports' ? loadReports() : loadEvents($('#ip').value.trim());
+		again.catch((err) => show($('#err'), err.message, true));
+	};
+	el.appendChild(a);
+}
+
 async function loadReports() {
-	const d = await api('/admin/reports?limit=100');
+	const d = await api('/admin/reports?limit=' + pageLimit('reports'));
+	// A paste expires sooner than a report, so the window is a ceiling rather than one number.
+	moreLine($('#reportsNote'), 'reports', d.count, d.total, `up to ${d.retention_days} days`);
 	const tb = $('#reports tbody');
 	tb.replaceChildren();
 	if (!d.reports.length) {
@@ -314,39 +341,46 @@ async function loadReports() {
 	}
 }
 
-async function loadAbuse(ip) {
-	const q = ip ? '?ip=' + encodeURIComponent(ip) + '&limit=200' : '?limit=100';
-	const d = await api('/admin/abuse' + q);
-	$('#abuseNote').textContent = 'kept ' + d.retention_days + ' days, ' + d.count + ' shown';
-	const tb = $('#abuse tbody');
+async function loadEvents(ip) {
+	const limit = pageLimit('events');
+	const d = await api('/admin/events' + (ip ? '?ip=' + encodeURIComponent(ip) + '&limit=' + limit : '?limit=' + limit));
+	moreLine($('#eventsNote'), 'events', d.count, d.total, `${d.retention_days} days`);
+	const tb = $('#events tbody');
 	tb.replaceChildren();
-	if (!d.submissions.length) {
+	if (!d.events.length) {
 		const tr = document.createElement('tr');
-		const td = cell(tr, 'no records');
+		const td = cell(tr, 'nothing logged');
 		td.className = 'muted';
-		td.colSpan = 5;
+		td.colSpan = 7;
 		tb.appendChild(tr);
 		return;
 	}
 	// Column order follows the builder's recent events: when, what, which one, who.
-	for (const r of d.submissions) {
+	for (const r of d.events) {
 		const tr = document.createElement('tr');
-		cell(tr, tfmt(r.at));
-		cell(tr, r.kind || '?');
-		cell(tr, r.slug, true);
+		cell(tr, stamp(r.at));
+		cell(tr, r.kind);
+		// Only a submission carries a slug, and only while the report is still there, so the
+		// rest of the row types leave these cells empty rather than showing a placeholder.
+		if (r.slug) cell(tr, r.slug, true);
+		else cell(tr, '');
+		cell(tr, r.admin || '');
 		const td = cell(tr, '');
-		if (r.country) {
-			const g = document.createElement('span');
-			g.className = 'me-1';
-			g.title = r.country;
-			g.textContent = flag(r.country);
-			td.appendChild(g);
+		if (r.ip) {
+			if (r.country) {
+				const g = document.createElement('span');
+				g.className = 'me-1';
+				g.title = r.country;
+				g.textContent = flag(r.country);
+				td.appendChild(g);
+			}
+			codeLink(td, r.ip, null, { ipc: true }).onclick = (e) => {
+				e.preventDefault();
+				$('#ip').value = r.ip;
+				loadEvents(r.ip);
+			};
 		}
-		codeLink(td, r.ip, null, { ipc: true }).onclick = (e) => {
-			e.preventDefault();
-			$('#ip').value = r.ip;
-			loadAbuse(r.ip);
-		};
+		cell(tr, r.detail || '').className = 'muted';
 		cell(tr, stamp(r.record_expires));
 		tb.appendChild(tr);
 	}
@@ -363,7 +397,7 @@ async function purge(what, label, count) {
 	}
 	if (!confirm(`Delete all ${count} ${label}? This cannot be undone.`)) return;
 
-	const btns = [$('#purgeReports'), $('#purgeAbuse')];
+	const btns = [$('#purgeReports'), $('#purgeEvents')];
 	btns.forEach((b) => (b.disabled = true));
 	let total = 0;
 	try {
@@ -390,7 +424,7 @@ async function refresh() {
 	closeConfirm(false);
 	show($('#err'), '');
 	try {
-		await Promise.all([loadStats(), loadReports(), loadAbuse($('#ip').value.trim())]);
+		await Promise.all([loadStats(), loadReports(), loadEvents($('#ip').value.trim())]);
 		$('#updated').textContent = 'updated ' + new Date().toLocaleTimeString();
 	} catch (e) {
 		show($('#err'), e.message, true);
@@ -575,10 +609,10 @@ window.addEventListener('DOMContentLoaded', () => {
 	$('#refresh').onclick = refresh;
 	$('#kill-btn').onclick = toggleKill;
 	$('#purgeReports').onclick = () => purge('reports', 'reports', lastCounts.reports);
-	$('#purgeAbuse').onclick = () => purge('abuse', 'submission records', lastCounts.abuse);
+	$('#purgeEvents').onclick = () => purge('events', 'log entries', lastCounts.events);
 	$('#findForm').addEventListener('submit', (e) => {
 		e.preventDefault();
-		loadAbuse($('#ip').value.trim());
+		loadEvents($('#ip').value.trim());
 	});
 	$('#lock').onclick = lock;
 

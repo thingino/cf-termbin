@@ -53,6 +53,26 @@ function ensureSchema(env) {
 				)`),
 				env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_submissions_exp ON submissions(exp)'),
 				env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_submissions_ip ON submissions(ip)'),
+				// The event log, which supersedes `submissions`: accepted submissions and admin
+				// actions in one append-only table. Its own id rather than a slug key, because a
+				// slug is no longer unique here (submitted, then deleted, is two events) and an
+				// admin action has no slug at all. `ip` is null for admin actions on purpose: the
+				// address kept for 7 days is the submitter's, and logging our own would quietly
+				// widen that.
+				env.DB.prepare(`CREATE TABLE IF NOT EXISTS events (
+					id      INTEGER PRIMARY KEY AUTOINCREMENT,
+					ts      INTEGER NOT NULL,
+					kind    TEXT NOT NULL,
+					slug    TEXT,
+					ip      TEXT,
+					country TEXT,
+					admin   TEXT,
+					detail  TEXT,
+					exp     INTEGER NOT NULL
+				)`),
+				env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts)'),
+				env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_events_exp ON events(exp)'),
+				env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_events_ip ON events(ip)'),
 			]);
 
 			// CREATE TABLE IF NOT EXISTS will not alter a table an earlier version
@@ -77,6 +97,21 @@ function ensureSchema(env) {
 				} catch (err) {
 					if (!/duplicate column|no such column/i.test(String(err))) throw err;
 				}
+			}
+
+			// Carry the abuse trail already on disk into the event log, once, so switching the
+			// portal over does not look like the history was lost. Guarded on the log being
+			// empty rather than on a marker row: it runs at most once per database, and a
+			// second attempt after the first succeeded would duplicate every row. `submissions`
+			// is deliberately left in place and still reaped, so this is not the only copy
+			// until its 7 day window has passed.
+			const logged = await env.DB.prepare('SELECT COUNT(*) n FROM events').first();
+			if ((logged?.n ?? 0) === 0) {
+				const moved = await env.DB.prepare(
+					`INSERT INTO events (ts, kind, slug, ip, country, exp)
+					 SELECT created, 'submit', slug, ip, country, exp FROM submissions`,
+				).run();
+				if (moved.meta?.changes) console.log(`events: backfilled ${moved.meta.changes} submission(s)`);
 			}
 		})().catch((err) => {
 			schemaReady = null; // let the next request retry rather than wedging the isolate
@@ -128,18 +163,18 @@ export default {
 		// 'admin' contains an 'i', which is not in the slug alphabet, so none of this can
 		// collide with a report path.
 		if (segments[0] === 'admin' && segments.length === 2 && ADMIN_API.has(segments[1]) && request.method === 'GET') {
-			if (segments[1] === 'abuse') return withCors(await abuse(request, env, url), env);
+			if (segments[1] === 'events') return withCors(await events(request, env, url), env);
 			if (segments[1] === 'stats') return withCors(await stats(request, env), env);
 			if (segments[1] === 'reports') return withCors(await reports(request, env, url), env);
 		}
 
 		// Purging everything, which is a takedown tool rather than routine: reports expire on
-		// their own at TTL_DAYS and submission records at ABUSE_TTL_DAYS.
+		// their own at TTL_DAYS and event rows at ABUSE_TTL_DAYS.
 		if (
 			segments[0] === 'admin' &&
 			segments.length === 2 &&
 			request.method === 'DELETE' &&
-			(segments[1] === 'reports' || segments[1] === 'abuse')
+			(segments[1] === 'reports' || segments[1] === 'events')
 		) {
 			return withCors(await purge(request, env, url, segments[1]), env);
 		}
@@ -190,28 +225,77 @@ export default {
 			.bind(now, batch)
 			.run();
 
-		// Its own cutoff, so abuse records outlive the reports they point at.
+		// Its own cutoff, so a submission record outlives the report it points at.
 		const records = await env.DB.prepare(
 			'DELETE FROM submissions WHERE slug IN (SELECT slug FROM submissions WHERE exp < ? LIMIT ?)',
 		)
 			.bind(now, batch)
 			.run();
 
+		const logs = await env.DB.prepare('DELETE FROM events WHERE id IN (SELECT id FROM events WHERE exp < ? LIMIT ?)')
+			.bind(now, batch)
+			.run();
+
+		const nReports = reports.meta?.changes ?? 0;
+		const nRecords = records.meta?.changes ?? 0;
+		const nLogs = logs.meta?.changes ?? 0;
 		console.log(
-			`reclaim: ${reports.meta?.changes ?? 0} report(s), ${records.meta?.changes ?? 0} abuse record(s), db size now ${records.meta?.size_after ?? '?'} bytes`,
+			`reclaim: ${nReports} report(s), ${nRecords} abuse record(s), ${nLogs} event(s), db size now ${logs.meta?.size_after ?? '?'} bytes`,
 		);
+		// Only when it actually reclaimed something. A tick that finds nothing to do is the
+		// normal case and logging it would bury the rest under 96 rows a day.
+		if (nReports || nRecords || nLogs) {
+			const parts = [];
+			if (nReports) parts.push(`${nReports} report${nReports === 1 ? '' : 's'}`);
+			if (nRecords) parts.push(`${nRecords} record${nRecords === 1 ? '' : 's'}`);
+			if (nLogs) parts.push(`${nLogs} event${nLogs === 1 ? '' : 's'}`);
+			await logEvent(env, 'reap', { detail: `expired ${parts.join(', ')}` });
+		}
 	},
 };
+
+// Same thresholds the portal formats with, so a detail string reads like the tables around it.
+const humanBytes = (n) =>
+	n < 1024 ? `${n} B` : n < 1048576 ? `${(n / 1024).toFixed(1)} KiB` : `${(n / 1048576).toFixed(2)} MiB`;
+
+// One row per thing worth seeing on the admin page: an admin action or a reclaim run. Never
+// throws into the caller, because losing a log line must not fail the operation it describes.
+// A submission logs itself inside the same batch that writes the report instead, so the report
+// and its record cannot disagree.
+async function logEvent(env, kind, fields = {}) {
+	const now = Math.floor(Date.now() / 1000);
+	try {
+		await env.DB.prepare(
+			'INSERT INTO events (ts, kind, slug, ip, country, admin, detail, exp) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+		)
+			.bind(
+				now,
+				kind,
+				fields.slug ?? null,
+				fields.ip ?? null,
+				fields.country ?? null,
+				fields.admin ?? null,
+				fields.detail ?? null,
+				now + num(env.ABUSE_TTL_DAYS, 7) * 86400,
+			)
+			.run();
+	} catch (err) {
+		console.log(`event ${kind} not logged: ${err}`);
+	}
+}
 
 // The kill switch. Refuses submissions while leaving reads, deletes and expiry alone, which
 // is what an incident wants: stop taking new material without hiding what is already stored.
 async function pause(request, env, url) {
-	if (!(await adminIdentity(request, env))) return notFound();
+	const who = await adminIdentity(request, env);
+	if (!who) return notFound();
 	const state = url.searchParams.get('state');
 	if (state !== 'on' && state !== 'off') return textResponse(400, 'state must be on or off\n');
+	await ensureSchema(env);
 	const budget = env.BUDGET.get(env.BUDGET.idFromName('global'));
 	const result = await budget.setPaused(state === 'on');
 	console.log(`submissions ${result.paused ? 'paused' : 'resumed'}`);
+	await logEvent(env, result.paused ? 'paused' : 'resumed', { admin: who });
 	return jsonResponse(200, result);
 }
 
@@ -225,23 +309,25 @@ const PURGE_BATCHES = 20;
 async function purge(request, env, url, what) {
 	// Auth first, so an unauthenticated caller sees the same 404 as any unknown path and
 	// cannot tell this endpoint exists.
-	if (!(await adminIdentity(request, env))) return notFound();
+	const who = await adminIdentity(request, env);
+	if (!who) return notFound();
 	// Only after that is a clear error safe: the caller is already known to be an admin.
 	if (url.searchParams.get('confirm') !== 'all') {
 		return textResponse(400, 'add ?confirm=all to purge everything\n');
 	}
 	await ensureSchema(env);
 
-	// Both tables key on slug, so one statement shape covers either. `table` is chosen from a
-	// two-way comparison rather than interpolated from the request, so nothing user-supplied
-	// reaches the SQL.
-	const table = what === 'reports' ? 'pastes' : 'submissions';
+	// `table` and its key are chosen from a closed comparison rather than interpolated from the
+	// request, so nothing user-supplied reaches the SQL. Reports key on slug; the event log
+	// keys on its own id, since a slug there is neither unique nor always present.
+	const table = what === 'reports' ? 'pastes' : 'events';
+	const key = what === 'reports' ? 'slug' : 'id';
 	const batch = num(env.RECLAIM_BATCH, 50);
 
 	let deleted = 0;
 	for (let i = 0; i < PURGE_BATCHES; i++) {
 		const run = await env.DB.prepare(
-			`DELETE FROM ${table} WHERE slug IN (SELECT slug FROM ${table} LIMIT ?)`,
+			`DELETE FROM ${table} WHERE ${key} IN (SELECT ${key} FROM ${table} LIMIT ?)`,
 		)
 			.bind(batch)
 			.run();
@@ -253,11 +339,17 @@ async function purge(request, env, url, what) {
 	const left = await env.DB.prepare(`SELECT COUNT(*) n FROM ${table}`).first();
 	const remaining = left?.n ?? 0;
 	console.log(`purge ${what}: deleted ${deleted}, ${remaining} remaining`);
+	// After the deletes, not before: clearing the log must not take the record of its own
+	// clearing with it.
+	await logEvent(env, what === 'reports' ? 'purge_reports' : 'purge_events', {
+		admin: who,
+		detail: `deleted ${deleted}${remaining ? `, ${remaining} left` : ''}`,
+	});
 	return jsonResponse(200, { purged: what, deleted, remaining });
 }
 
 // Endpoint names under /admin that belong to the API rather than to the static portal.
-const ADMIN_API = new Set(['mode', 'stats', 'reports', 'abuse']);
+const ADMIN_API = new Set(['mode', 'stats', 'reports', 'events']);
 
 // Serves the portal from this origin by fetching it from wherever it is published, which
 // for this deployment is GitHub Pages. The assets are not embedded in the Worker: the
@@ -582,9 +674,13 @@ async function insert(env, row, slugLen) {
 					// the backing buffer is the payload and nothing else.
 					row.body.buffer,
 				),
+				// In the same batch as the report, so a stored report always has its event and a
+				// failed insert leaves neither. `detail` carries the report kind and size, which
+				// is what makes a submit row readable next to an admin action.
 				env.DB.prepare(
-					'INSERT INTO submissions (slug, ip, kind, country, created, exp) VALUES (?, ?, ?, ?, ?, ?)',
-				).bind(slug, row.ip, row.kind, row.country, row.created, row.abuseExp),
+					`INSERT INTO events (ts, kind, slug, ip, country, detail, exp)
+					 VALUES (?, 'submit', ?, ?, ?, ?, ?)`,
+				).bind(row.created, slug, row.ip, row.country, `${row.kind}, ${humanBytes(row.size)}`, row.abuseExp),
 			]);
 			return slug;
 		} catch (err) {
@@ -669,42 +765,49 @@ function isClient(request, env) {
 // The point of keeping submitter addresses is being able to answer "who sent this"
 // and "what else did they send". Without a way to ask, the data would be collected
 // for nothing, which is the exact trap of keeping what you do not need.
-async function abuse(request, env, url) {
+async function events(request, env, url) {
 	if (!(await adminIdentity(request, env))) return notFound();
 	await ensureSchema(env);
 
 	const ip = url.searchParams.get('ip');
 	const slug = url.searchParams.get('slug');
 	const limit = limitParam(url);
+	const cols = 'ts, kind, slug, ip, country, admin, detail, exp';
 
+	// Newest first by id, not ts: several events can share a second, and only the id orders
+	// them the way they happened.
 	let rows;
 	if (ip) {
-		rows = await env.DB.prepare(
-			'SELECT slug, ip, kind, country, created, exp FROM submissions WHERE ip = ? ORDER BY created DESC LIMIT ?',
-		)
+		rows = await env.DB.prepare(`SELECT ${cols} FROM events WHERE ip = ? ORDER BY id DESC LIMIT ?`)
 			.bind(ip, limit)
 			.all();
 	} else if (slug) {
-		rows = await env.DB.prepare('SELECT slug, ip, kind, country, created, exp FROM submissions WHERE slug = ?')
-			.bind(slug)
+		rows = await env.DB.prepare(`SELECT ${cols} FROM events WHERE slug = ? ORDER BY id DESC LIMIT ?`)
+			.bind(slug, limit)
 			.all();
 	} else {
-		rows = await env.DB.prepare(
-			'SELECT slug, ip, kind, country, created, exp FROM submissions ORDER BY created DESC LIMIT ?',
-		)
-			.bind(limit)
-			.all();
+		rows = await env.DB.prepare(`SELECT ${cols} FROM events ORDER BY id DESC LIMIT ?`).bind(limit).all();
 	}
+
+	// Counted under the same filter as the rows, so "the latest 60 of 627" means 627 matching
+	// this address rather than 627 in the table.
+	let all;
+	if (ip) all = await env.DB.prepare('SELECT COUNT(*) n FROM events WHERE ip = ?').bind(ip).first();
+	else if (slug) all = await env.DB.prepare('SELECT COUNT(*) n FROM events WHERE slug = ?').bind(slug).first();
+	else all = await env.DB.prepare('SELECT COUNT(*) n FROM events').first();
 
 	return jsonResponse(200, {
 		retention_days: num(env.ABUSE_TTL_DAYS, 7),
 		count: rows.results.length,
-		submissions: rows.results.map((r) => ({
-			slug: r.slug,
-			ip: r.ip,
+		total: all?.n ?? 0,
+		events: rows.results.map((r) => ({
+			at: new Date(r.ts * 1000).toISOString(),
 			kind: r.kind,
+			slug: r.slug || null,
+			ip: r.ip || null,
 			country: r.country || null,
-			at: new Date(r.created * 1000).toISOString(),
+			admin: r.admin || null,
+			detail: r.detail || null,
 			record_expires: new Date(r.exp * 1000).toISOString(),
 		})),
 	});
@@ -717,7 +820,7 @@ async function stats(request, env) {
 	const byKind = await env.DB.prepare(
 		'SELECT kind, COUNT(*) n, COALESCE(SUM(size), 0) b FROM pastes GROUP BY kind',
 	).all();
-	const records = await env.DB.prepare('SELECT COUNT(*) n FROM submissions').all();
+	const records = await env.DB.prepare('SELECT COUNT(*) n FROM events').all();
 
 	// size_after rides along on any query's meta, so live database size is free.
 	const dbBytes = records.meta?.size_after ?? 0;
@@ -729,7 +832,7 @@ async function stats(request, env) {
 			bytes: byKind.results.reduce((a, r) => a + r.b, 0),
 			by_kind: byKind.results,
 		},
-		abuse: { records: records.results[0]?.n ?? 0, retention_days: num(env.ABUSE_TTL_DAYS, 7) },
+		events: { records: records.results[0]?.n ?? 0, retention_days: num(env.ABUSE_TTL_DAYS, 7) },
 		database: { bytes: dbBytes, limit: 524288000, percent_of_limit: ((dbBytes / 524288000) * 100).toFixed(2) },
 		budget,
 	});
@@ -748,8 +851,14 @@ async function reports(request, env, url) {
 		.bind(limit)
 		.all();
 
+	// So the page can say "the latest 25 of 144" rather than only what it was handed. The
+	// window is a ceiling, not a single value: a paste expires at PASTE_TTL_DAYS, sooner.
+	const all = await env.DB.prepare('SELECT COUNT(*) n FROM pastes').first();
+
 	return jsonResponse(200, {
 		count: rows.results.length,
+		total: all?.n ?? 0,
+		retention_days: Math.min(num(env.TTL_DAYS, 3), num(env.MAX_TTL_DAYS, 3)),
 		reports: rows.results.map((r) => ({
 			slug: r.slug,
 			kind: r.kind,
@@ -771,10 +880,13 @@ async function remove(request, env, slug) {
 	const holder = presented ? constantTimeEqual(await sha256hex(presented), row.tok || '') : false;
 
 	// A wrong token gets the same 404 as a missing slug, so failing to delete never
-	// confirms that a report is there.
-	if (!holder && !(await adminIdentity(request, env))) return notFound();
+	// confirms that a report is there. Short-circuits exactly as before: the admin check is
+	// skipped for a token holder, it is only kept now so the log can name who did it.
+	const who = holder ? null : await adminIdentity(request, env);
+	if (!holder && !who) return notFound();
 
 	await env.DB.prepare('DELETE FROM pastes WHERE slug = ?').bind(slug).run();
+	await logEvent(env, 'delete', { slug, admin: who, detail: holder ? 'by submitter token' : null });
 	// Deliberately just this. The storage layer keeps a restorable history, which is
 	// a fact for whoever runs the bin and jargon to whoever is reading the reply.
 	return textResponse(200, 'deleted\n');

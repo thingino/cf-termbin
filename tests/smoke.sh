@@ -431,11 +431,11 @@ body_has "json has url" '"url"'
 body_has "json has delete_token" '"delete_token"'
 body_has "json has expires" '"expires"'
 
-echo "-- abuse record (admin only, outlives the report)"
+echo "-- event log (admin only, outlives the report)"
 ABSLUG="$(submit_slug abuse "$(report 'abuse record test')")"
-check "abuse lookup needs admin" 404 "${BASE}/admin/abuse"
-check "abuse lookup with wrong key" 404 -H "Authorization: Bearer wrong" "${BASE}/admin/abuse"
-check "abuse lookup by slug" 200 -H "Authorization: Bearer ${ADMIN}" "${BASE}/admin/abuse?slug=${ABSLUG}"
+check "event log needs admin" 404 "${BASE}/admin/events"
+check "event log with wrong key" 404 -H "Authorization: Bearer wrong" "${BASE}/admin/events"
+check "event log by slug" 200 -H "Authorization: Bearer ${ADMIN}" "${BASE}/admin/events?slug=${ABSLUG}"
 body_has "record has the slug" "${ABSLUG}"
 body_has "record has an ip field" '"ip"'
 # Present as a key even where the edge supplies no value, so the portal can decide to show a
@@ -443,8 +443,17 @@ body_has "record has an ip field" '"ip"'
 body_has "record carries the origin country" '"country"'
 body_has "record states its retention" '"retention_days"'
 body_has "record expiry is a date" '"record_expires"'
-check "abuse lookup lists recent" 200 -H "Authorization: Bearer ${ADMIN}" "${BASE}/admin/abuse?limit=5"
+# A submission is one event kind among several now, and the detail is what makes the log
+# readable next to an admin action rather than a bare list of addresses.
+body_has "the row is a submit event" '"kind": "submit"'
+body_has "and names the report kind and size" '"detail": "diag,'
+check "event log lists recent" 200 -H "Authorization: Bearer ${ADMIN}" "${BASE}/admin/events?limit=5"
 body_has "listing has a count" '"count"'
+body_has "and the total behind it" '"total"'
+# The total is counted under the same filter as the rows, or "the latest 5 of N" would count
+# rows the filter excluded. One submission by this address, so a filtered total of 1.
+check "filtered total counts only the match" 200 -H "Authorization: Bearer ${ADMIN}" "${BASE}/admin/events?slug=${ABSLUG}"
+body_has "filtered total is the filtered count" '"total": 1'
 check "unknown admin subpath 404s" 404 -H "Authorization: Bearer ${ADMIN}" "${BASE}/admin/nonsense"
 check "admin endpoints reject non-GET" 404 -X POST -H "Authorization: Bearer ${ADMIN}" "${BASE}/admin/stats"
 
@@ -478,6 +487,10 @@ body_has "stats reports today budget" '"budget"'
 check "reports needs a session" 404 "${BASE}/admin/reports"
 check "reports with a session" 200 -H "Authorization: Bearer ${ADMIN}" "${BASE}/admin/reports?limit=5"
 body_has "report list has slugs" '"slug"'
+# The page says "the latest 5 of N kept (up to 3 days)", so the listing has to carry the whole
+# count and the window and not just the rows it returned.
+body_has "listing carries the full total" '"total"'
+body_has "and the retention window" '"retention_days"'
 body_lacks "report list never returns bodies" '"body"'
 # Hardware and build identity used to be lifted into columns and returned here. A paste bin
 # keeping a device inventory is not something to reintroduce by accident.
@@ -515,12 +528,12 @@ same_count() { # same_count <name> <url-without-limit> <url-with-explicit-limit>
 }
 
 same_count "reports default matches limit=50" "${BASE}/admin/reports" "${BASE}/admin/reports?limit=50"
-same_count "abuse default matches limit=50" "${BASE}/admin/abuse" "${BASE}/admin/abuse?limit=50"
+same_count "events default matches limit=50" "${BASE}/admin/events" "${BASE}/admin/events?limit=50"
 # ?ip= is its own query branch with its own LIMIT, and it is the documented
 # abuse-follow-up path. Read the address back rather than assuming what dev reports.
-check "abuse listing for the address" 200 -H "Authorization: Bearer ${ADMIN}" "${BASE}/admin/abuse?limit=50"
+check "event listing for the address" 200 -H "Authorization: Bearer ${ADMIN}" "${BASE}/admin/events?limit=50"
 SUBIP="$(sed -n 's/.*"ip": "\([^"]*\)".*/\1/p' "$BODY" | head -1)"
-same_count "abuse by ip default matches limit=50" "${BASE}/admin/abuse?ip=${SUBIP}" "${BASE}/admin/abuse?ip=${SUBIP}&limit=50"
+same_count "events by ip default matches limit=50" "${BASE}/admin/events?ip=${SUBIP}" "${BASE}/admin/events?ip=${SUBIP}&limit=50"
 same_count "non-numeric limit falls back to the default" "${BASE}/admin/reports?limit=abc" "${BASE}/admin/reports?limit=50"
 # SQLite reads a negative LIMIT as no limit, so the 500 cap has to clamp low as well.
 check "negative limit is clamped" 200 -H "Authorization: Bearer ${ADMIN}" "${BASE}/admin/reports?limit=-1"
@@ -669,6 +682,15 @@ body_has "stats reports the switch" '"paused": true'
 check "pause off" 200 -X POST -H "Authorization: Bearer ${ADMIN}" "${BASE}/admin/pause?state=off"
 body_has "and says so" '"paused": false'
 check "submissions work again" 201 "${CH[@]}" --data-binary "$(report 'after the pause')" "${BASE}/"
+# Both sides of the switch are logged, with the admin named, which is the point of the log.
+check "the switch is logged" 200 -H "Authorization: Bearer ${ADMIN}" "${BASE}/admin/events?limit=50"
+body_has "pausing logged" '"kind": "paused"'
+body_has "resuming logged" '"kind": "resumed"'
+body_has "and names who did it" '"admin": "smoketest"'
+# A single delete is logged too, by whoever did it.
+check "delete the kill switch report" 200 -X DELETE -H "Authorization: Bearer ${ADMIN}" "${BASE}/${KSLUG}"
+check "the delete is logged" 200 -H "Authorization: Bearer ${ADMIN}" "${BASE}/admin/events?slug=${KSLUG}"
+body_has "as a delete event" '"kind": "delete"'
 
 echo "-- purge: a takedown tool, and it must be hard to fire by accident"
 PSLUG="$(submit_slug purge "$(report 'purge target')")"
@@ -680,14 +702,18 @@ check "purge reports" 200 -X DELETE -H "Authorization: Bearer ${ADMIN}" "${BASE}
 body_has "purge reports reports a count" '"deleted"'
 body_has "and what is left" '"remaining": 0'
 check "the report is gone" 404 "${BASE}/${PSLUG}"
-# Deliberate: an abuse trail outlives the reports it points at, so purging reports must not
-# take the submission records with it.
-check "submission records survive a report purge" 200 -H "Authorization: Bearer ${ADMIN}" "${BASE}/admin/abuse?slug=${PSLUG}"
+# Deliberate: the log outlives the reports it points at, so purging reports must not take the
+# event rows with it.
+check "the submit event survives a report purge" 200 -H "Authorization: Bearer ${ADMIN}" "${BASE}/admin/events?slug=${PSLUG}"
 body_has "the record is still there" "${PSLUG}"
-check "purge submission records" 200 -X DELETE -H "Authorization: Bearer ${ADMIN}" "${BASE}/admin/abuse?confirm=all"
-body_has "and that reports a count too" '"purged": "abuse"'
-check "records are gone" 200 -H "Authorization: Bearer ${ADMIN}" "${BASE}/admin/abuse?limit=5"
-body_has "nothing left to list" '"count": 0'
+check "clear the log" 200 -X DELETE -H "Authorization: Bearer ${ADMIN}" "${BASE}/admin/events?confirm=all"
+body_has "and that reports a count too" '"purged": "events"'
+check "the log is cleared" 200 -H "Authorization: Bearer ${ADMIN}" "${BASE}/admin/events?limit=5"
+body_lacks "the submission rows are gone" "${PSLUG}"
+# The clearing is logged after the deletes, deliberately, so it does not erase the record of
+# itself. One row left, not none.
+body_has "and the clearing logged itself" '"kind": "purge_events"'
+body_has "exactly that one row" '"count": 1'
 # The portal proxy must not swallow a DELETE to an API path, and an unknown one still 404s.
 check "purge on an unknown table 404s" 404 -X DELETE -H "Authorization: Bearer ${ADMIN}" "${BASE}/admin/nonsense?confirm=all"
 
@@ -722,9 +748,13 @@ RSLUG="$(submit_slug reclaim "$(report 'also stale')")"
 check "second report is expired but still present" 410 "${BASE}/${RSLUG}"
 curl -s -o /dev/null "${BASE}/cdn-cgi/handler/scheduled"
 check "and the reclaimer takes it too, nothing is exempt" 404 "${BASE}/${RSLUG}"
-# The abuse record has a longer clock, so reclaiming the report must not remove it.
-check "abuse record survives the report" 200 -H "Authorization: Bearer ${ADMIN}" "${BASE}/admin/abuse?slug=${RSLUG}"
+# The event log has a longer clock, so reclaiming the report must not remove its row.
+check "submit event survives the report" 200 -H "Authorization: Bearer ${ADMIN}" "${BASE}/admin/events?slug=${RSLUG}"
 body_has "record still there after the report is gone" "${RSLUG}"
+# And a reclaim logs itself, which is what the portal shows for expiry.
+check "the reclaim is logged" 200 -H "Authorization: Bearer ${ADMIN}" "${BASE}/admin/events?limit=50"
+body_has "as a reap event" '"kind": "reap"'
+body_has "naming what it expired" '"detail": "expired'
 
 stop_dev
 echo
