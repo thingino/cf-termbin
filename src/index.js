@@ -790,9 +790,15 @@ async function loginEvents(env, { ip, slug, limit }) {
 	// A slug can never match a login, so that filter skips the builder entirely.
 	if (!env.AUTHDB || slug) return { rows: [], total: 0 };
 
+	// Scoped to logins that came through this bin's own sign-in page. The builder records which
+	// app each login came through, so a login to the builder that never touched this bin stays on
+	// the builder's page where it belongs. That label is an audit field the caller supplies, and
+	// it is used here for exactly one thing: deciding which rows to display. It must never gate
+	// access, here or there.
+	const app = (env.LOGIN_APP || 'tb').trim();
 	const holes = LOGIN_KINDS.map(() => '?').join(',');
-	const where = `kind IN (${holes})` + (ip ? ' AND ip_full = ?' : '');
-	const args = ip ? [...LOGIN_KINDS, ip] : LOGIN_KINDS;
+	const where = `kind IN (${holes}) AND app = ?` + (ip ? ' AND ip_full = ?' : '');
+	const args = ip ? [...LOGIN_KINDS, app, ip] : [...LOGIN_KINDS, app];
 
 	try {
 		const got = await env.AUTHDB.prepare(

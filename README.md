@@ -58,7 +58,7 @@ implementation instead of two that drift.
 
 ```sh
 node tests/unit.mjs   # 111 checks, ~instant
-tests/smoke.sh        # 268 checks over 13 wrangler dev instances
+tests/smoke.sh        # 270 checks over 13 wrangler dev instances
 tests/web.sh          # 21 checks in Chromium, both auth modes
 ```
 
@@ -231,8 +231,14 @@ week. One row per accepted submission, per admin action and per reclaim run:
 Admin logins are not in that table, because they do not happen here: this Worker never sees a
 password or a code. In builder mode the listing reads `admin_login_ok`, `admin_login_fail` and
 `admin_login_throttled` out of the builder's own events table, which is already bound for auth,
-and merges them in by time. So clearing this log cannot erase the login trail, and a login
-attempt that never reached this bin is still visible against it.
+and merges them in by time. So clearing this log cannot erase the login trail: those rows are
+not this Worker's to delete.
+
+Only logins through *this* bin's sign-in page are shown. The builder records which app each
+login came through and `LOGIN_APP` selects it here, so a login to the builder that never touched
+this bin stays on the builder's page. That label is an audit field the caller supplies: it
+decides which rows are displayed and nothing else. It grants no access at either end, and a row
+without it is not assumed to be ours.
 
 Only *successful* submissions are recorded. Refused ones stay in the ephemeral log,
 because writing a row per refusal would turn a flood into database writes against your

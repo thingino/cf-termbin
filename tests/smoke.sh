@@ -152,10 +152,14 @@ start_dev() {
 	  INSERT OR REPLACE INTO sessions (token, admin, expires, last_active) VALUES ('$(printf '%s' expired-token | sha256sum | cut -d' ' -f1)', 'smoketest', $(( $(date +%s) - 10 )), $(date +%s));
 	  INSERT OR REPLACE INTO sessions (token, admin, expires, last_active) VALUES ('$(printf '%s' idle-token | sha256sum | cut -d' ' -f1)', 'smoketest', $(( $(date +%s) + 28800 )), $(( $(date +%s) - 9000 )));
 	  INSERT OR REPLACE INTO sessions (token, admin, expires, last_active) VALUES ('$(printf '%s' disabled-token | sha256sum | cut -d' ' -f1)', 'gone', $(( $(date +%s) + 28800 )), $(date +%s));
-	  CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL, kind TEXT NOT NULL, build_id TEXT, uid TEXT, ip_bucket TEXT, ip_full TEXT, country TEXT, detail TEXT);
-	  INSERT INTO events (ts, kind, ip_bucket, ip_full, country, detail) VALUES ($(( $(date +%s) - 60 )), 'admin_login_ok', '203.0.113.0', '203.0.113.7', 'US', 'session created (smoketest)');
-	  INSERT INTO events (ts, kind, ip_bucket, ip_full, country, detail) VALUES ($(( $(date +%s) - 120 )), 'admin_login_fail', '203.0.113.0', '203.0.113.7', 'US', 'bad login (nobody)');
-	  INSERT INTO events (ts, kind, ip_bucket, ip_full, country, detail) VALUES ($(( $(date +%s) - 180 )), 'queued', NULL, NULL, NULL, 'some build, not a login');
+	  CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL, kind TEXT NOT NULL, build_id TEXT, uid TEXT, ip_bucket TEXT, ip_full TEXT, country TEXT, detail TEXT, app TEXT);
+	  INSERT INTO events (ts, kind, ip_bucket, ip_full, country, detail, app) VALUES ($(( $(date +%s) - 60 )), 'admin_login_ok', '203.0.113.0', '203.0.113.7', 'US', 'session created (smoketest)', 'tb');
+	  INSERT INTO events (ts, kind, ip_bucket, ip_full, country, detail, app) VALUES ($(( $(date +%s) - 120 )), 'admin_login_fail', '203.0.113.0', '203.0.113.7', 'US', 'bad login (nobody)', 'tb');
+	  -- A login through the builder's own page, and one from before the app label existed. Neither
+	  -- belongs on this bin's page.
+	  INSERT INTO events (ts, kind, ip_bucket, ip_full, country, detail, app) VALUES ($(( $(date +%s) - 140 )), 'admin_login_ok', '198.51.100.0', '198.51.100.4', 'US', 'session created (elsewhere)', 'builder');
+	  INSERT INTO events (ts, kind, ip_bucket, ip_full, country, detail, app) VALUES ($(( $(date +%s) - 160 )), 'admin_login_ok', '198.51.100.0', '198.51.100.5', 'US', 'session created (unlabelled)', NULL);
+	  INSERT INTO events (ts, kind, ip_bucket, ip_full, country, detail, app) VALUES ($(( $(date +%s) - 180 )), 'queued', NULL, NULL, NULL, 'some build, not a login', NULL);
 	" >/dev/null 2>&1 || { echo "could not seed the auth database"; exit 1; }
 
 	# PORTAL_UPSTREAM cleared first: wrangler dev reads wrangler.toml, where it points at the
@@ -464,6 +468,10 @@ body_has "a failed one does too" '"kind": "admin_login_fail"'
 body_lacks "but a failed login names nobody as the admin" '"admin": "nobody"'
 # Only the login kinds cross over. The builder's build traffic is its own page's business.
 body_lacks "and no other builder event leaks in" '"kind": "queued"'
+# Scoped to this bin's own sign-in page: a login through the builder's page, or one from before
+# the app label existed, is the builder's business and not shown here.
+body_lacks "a login through the builder's page stays there" 'session created (elsewhere)'
+body_lacks "and an unlabelled one is not assumed to be ours" 'session created (unlabelled)'
 # The total is counted under the same filter as the rows, or "the latest 5 of N" would count
 # rows the filter excluded. One submission by this address, so a filtered total of 1.
 check "filtered total counts only the match" 200 -H "Authorization: Bearer ${ADMIN}" "${BASE}/admin/events?slug=${ABSLUG}"

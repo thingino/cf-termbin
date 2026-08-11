@@ -93,6 +93,9 @@ SHAPE_MIN_SECTIONS = "3"
 SHAPE_MIN_KNOWN_SECTIONS = "2" # real reports clear this by 10x; a fake wrapper has 1
 BLOCK_DROPPERS = "1"           # 0 disables the fetch-and-run checks if one ever false-fires
 ABUSE_TTL_DAYS = "7"           # submitter address kept this long for abuse
+# Which app label the builder records for logins through this bin's sign-in page. Only decides
+# which login rows the admin page shows; it grants nothing and must never be used to.
+LOGIN_APP = "tb"
                                # follow-up, in its own table so it outlives the
                                # report it points at
 RECLAIM_BATCH = "50"           # rows per cron tick, keeps DELETE under 30s

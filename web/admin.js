@@ -470,12 +470,16 @@ async function signin() {
 	// Master token and username/password are two bodies for the same builder endpoint, which is
 	// how the builder itself does it. Either way the 6-digit code is sent: the master token is a
 	// credential, not a bypass.
+	// `app` is an audit label so the builder can record which door this login came through, and
+	// so this page can show only its own. Not a credential and not a permission: the builder
+	// prefers the Origin header and falls back to this only for a caller that sends none.
 	const body = masterMode
-		? { token: $('#mt').value.trim(), totp: $('#t').value.trim() }
+		? { token: $('#mt').value.trim(), totp: $('#t').value.trim(), app: 'tb' }
 		: {
 				username: $('#u').value.trim().toLowerCase(),
 				password: $('#p').value,
 				totp: $('#t').value.trim(),
+				app: 'tb',
 			};
 	let r, d;
 	try {
