@@ -64,6 +64,16 @@ body_lacks() {
 	if grep -qi -- "$2" "$BODY"; then fail "$1" "pattern '$2' WAS in body"; else pass "$1"; fi
 }
 
+# Reads one number out of the local builder database, for what no HTTP response reveals. Only
+# valid after start_dev, since it needs that instance's persist dir. The value is wrapped in a
+# marker because wrangler's --json carries plenty of other numbers (rows_read, duration,
+# size_after) that a bare "last field on the line" match would happily return instead.
+authdb_num() {
+	npx wrangler d1 execute thingino-builder --local --persist-to "$STATE" --json \
+		--command "SELECT 'MARK' || ($1) AS m" 2>/dev/null \
+		| sed -n 's/.*"MARK\([0-9][0-9]*\)".*/\1/p' | head -1
+}
+
 # A report shaped like the one real firmware emits: leading date/uptime/uname, then
 # the ===[ THINGINO ]=== block carrying ID=thingino, then further sections.
 # The client id is required for every submission now, so the helpers carry it.
@@ -137,8 +147,11 @@ start_dev() {
 		exit 1
 	fi
 
-	local state th
-	state="$(mktemp -d "${WORK}/state.XXXXXX")"
+	local th
+	# Global, not local: a check needs to read the builder's sessions table back to prove the
+	# bin slid `last_active`, which is invisible from any HTTP response.
+	STATE="$(mktemp -d "${WORK}/state.XXXXXX")"
+	local state="$STATE"
 
 	# Seeded before the server starts, so nothing contends for the SQLite file. Mirrors
 	# the builder's schema: sessions.token holds the hex SHA-256 of the bearer token.
@@ -151,6 +164,9 @@ start_dev() {
 	  INSERT OR REPLACE INTO sessions (token, admin, expires, last_active) VALUES ('${th}', 'smoketest', $(( $(date +%s) + 28800 )), $(date +%s));
 	  INSERT OR REPLACE INTO sessions (token, admin, expires, last_active) VALUES ('$(printf '%s' expired-token | sha256sum | cut -d' ' -f1)', 'smoketest', $(( $(date +%s) - 10 )), $(date +%s));
 	  INSERT OR REPLACE INTO sessions (token, admin, expires, last_active) VALUES ('$(printf '%s' idle-token | sha256sum | cut -d' ' -f1)', 'smoketest', $(( $(date +%s) + 28800 )), $(( $(date +%s) - 9000 )));
+	  -- 50 minutes idle: inside the 2h window, and past the 60s throttle, so a request through
+	  -- the bin must slide it.
+	  INSERT OR REPLACE INTO sessions (token, admin, expires, last_active) VALUES ('$(printf '%s' slide-token | sha256sum | cut -d' ' -f1)', 'smoketest', $(( $(date +%s) + 28800 )), $(( $(date +%s) - 3000 )));
 	  INSERT OR REPLACE INTO sessions (token, admin, expires, last_active) VALUES ('$(printf '%s' disabled-token | sha256sum | cut -d' ' -f1)', 'gone', $(( $(date +%s) + 28800 )), $(date +%s));
 	  CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL, kind TEXT NOT NULL, build_id TEXT, uid TEXT, ip_bucket TEXT, ip_full TEXT, country TEXT, detail TEXT, app TEXT);
 	  INSERT INTO events (ts, kind, ip_bucket, ip_full, country, detail, app) VALUES ($(( $(date +%s) - 60 )), 'admin_login_ok', '203.0.113.0', '203.0.113.7', 'US', 'session created (smoketest)', 'tb');
@@ -485,6 +501,29 @@ check "no session" 404 "${BASE}/admin/stats"
 check "unknown session" 404 -H "Authorization: Bearer nope" "${BASE}/admin/stats"
 check "expired session" 404 -H "Authorization: Bearer expired-token" "${BASE}/admin/stats"
 check "idle-timed-out session" 404 -H "Authorization: Bearer idle-token" "${BASE}/admin/stats"
+# The bin slides `last_active`, the one write it makes to the builder's database. Nothing in an
+# HTTP response shows it, so read the row back. Without this a session used only against the bin
+# died a fixed 2h after login however hard it was being used.
+SLIDE_H="$(printf '%s' slide-token | sha256sum | cut -d' ' -f1)"
+SLIDE_BEFORE="$(authdb_num "SELECT last_active FROM sessions WHERE token='${SLIDE_H}'")"
+check "a 50-minute-idle session still works" 200 -H "Authorization: Bearer slide-token" "${BASE}/admin/stats"
+SLIDE_AFTER="$(authdb_num "SELECT last_active FROM sessions WHERE token='${SLIDE_H}'")"
+if [ -n "$SLIDE_BEFORE" ] && [ -n "$SLIDE_AFTER" ] && [ "$SLIDE_AFTER" -gt "$SLIDE_BEFORE" ]; then
+	pass "using the bin slides the idle window (${SLIDE_BEFORE} -> ${SLIDE_AFTER})"
+else
+	fail "using the bin slides the idle window" "last_active ${SLIDE_BEFORE:-?} -> ${SLIDE_AFTER:-?}"
+fi
+# The slide is last in the function, after every check, so a session already past its window
+# cannot revive itself by being used.
+IDLE_H="$(printf '%s' idle-token | sha256sum | cut -d' ' -f1)"
+IDLE_BEFORE="$(authdb_num "SELECT last_active FROM sessions WHERE token='${IDLE_H}'")"
+check "the idle one is still refused" 404 -H "Authorization: Bearer idle-token" "${BASE}/admin/stats"
+IDLE_AFTER="$(authdb_num "SELECT last_active FROM sessions WHERE token='${IDLE_H}'")"
+if [ -n "$IDLE_BEFORE" ] && [ "$IDLE_BEFORE" = "$IDLE_AFTER" ]; then
+	pass "and a refused session is not revived by the slide"
+else
+	fail "and a refused session is not revived by the slide" "last_active ${IDLE_BEFORE:-?} -> ${IDLE_AFTER:-?}"
+fi
 # Revocation is authoritative: the session row is valid but the account is disabled.
 check "session of a disabled account" 404 -H "Authorization: Bearer disabled-token" "${BASE}/admin/stats"
 

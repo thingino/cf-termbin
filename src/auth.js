@@ -35,17 +35,23 @@ function bearer(request) {
 // newer, smaller service would hand over the builder's second factor. This Worker never
 // sees a password or a seed.
 //
-// The builder's D1 is bound read-only in practice: nothing here writes to it. The one
-// consequence is that `last_active` is not slid, so a session used only against this bin
-// idles out on the builder's 2 hour window rather than being kept alive by activity
-// here. That is a fair price for not being able to damage a live service's tables.
+// One statement in this Worker writes to the builder's database, and it is the slide at the
+// end of this function. Everything else only reads. The rule it relaxes was never a security
+// boundary, because a D1 binding is read-write at the platform level: it was blast-radius
+// control against our own bugs touching a live service's tables. So the write is kept to a
+// single UPDATE of one column on one row, reached only after every check below has passed.
+//
+// Without it, `last_active` stayed at whatever the builder set at login, so a session used
+// only against this bin died a fixed 2 hours after login however hard it was being used,
+// rather than 2 hours after going idle.
 async function builderSession(request, env) {
 	const token = bearer(request);
 	if (!token) return null;
 
 	const now = Math.floor(Date.now() / 1000);
+	const hash = await sha256hex(token);
 	const row = await env.AUTHDB.prepare('SELECT admin, expires, last_active FROM sessions WHERE token = ?')
-		.bind(await sha256hex(token))
+		.bind(hash)
 		.first();
 
 	// Fail closed on every field. An empty `admin` must not stand in for the master
@@ -61,6 +67,20 @@ async function builderSession(request, env) {
 			.bind(row.admin)
 			.first();
 		if (!account || account.disabled) return null;
+	}
+
+	// Slide the idle window, throttled to once a minute exactly as the builder throttles its
+	// own. Deliberately last: an expired, idle or revoked session has already returned above,
+	// so this can only extend a session that was valid on its own terms, and it never touches
+	// `expires`, so the builder's 8 hour ceiling from login still bounds the whole thing.
+	if (now - row.last_active >= 60) {
+		try {
+			await env.AUTHDB.prepare('UPDATE sessions SET last_active = ? WHERE token = ?').bind(now, hash).run();
+		} catch (err) {
+			// A session that could not be slid still works until its window runs out, so a failure
+			// here must not fail the request it was serving.
+			console.log(`session not slid: ${err}`);
+		}
 	}
 
 	return row.admin;

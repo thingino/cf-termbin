@@ -58,7 +58,7 @@ implementation instead of two that drift.
 
 ```sh
 node tests/unit.mjs   # 111 checks, ~instant
-tests/smoke.sh        # 270 checks over 13 wrangler dev instances
+tests/smoke.sh        # 274 checks over 13 wrangler dev instances
 tests/web.sh          # 21 checks in Chromium, both auth modes
 ```
 
