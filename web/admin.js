@@ -630,3 +630,18 @@ window.addEventListener('DOMContentLoaded', () => {
 		refresh();
 	}
 });
+
+// Refresh on a timer, which is also what keeps the session alive. The Worker slides the builder's
+// idle window on any authenticated request, but only on a request: a portal that never polls makes
+// none, so `last_active` stayed at login time and the session died at the 2 hour idle mark while
+// the 8 hour cap was still hours away. The builder's own panel polls, which is why it never showed
+// this. Skipped while the tab is hidden or a confirm popover is open, so a background tab does not
+// spend reads and a redraw does not yank a popover off its anchor.
+const POLL_MS = 60000;
+setInterval(() => {
+	if (document.hidden || cpop) return;
+	if ($('#app').style.display !== 'none' && key) refresh();
+}, POLL_MS);
+document.addEventListener('visibilitychange', () => {
+	if (!document.hidden && $('#app').style.display !== 'none' && key) refresh();
+});
