@@ -315,9 +315,7 @@ async function pause(request, env, url) {
 // has to. That is honest about a partial result rather than appearing to finish.
 const PURGE_BATCHES = 20;
 
-// What the two retention windows are, what they may be set to, and what the choice costs in
-// storage. The worst case is the daily byte budget times the window, which is the whole reason
-// the budget exists, so the page can show it rather than an admin discovering it at the ceiling.
+// What the two retention windows are and what they may be set to.
 async function getSettings(request, env) {
 	if (!(await adminIdentity(request, env))) return notFound();
 	await ensureSchema(env);
@@ -329,8 +327,6 @@ async function getSettings(request, env) {
 		// What applies when nothing is stored, which comes from the deployment rather than here.
 		defaults: { ttl_diag: num(env.TTL_DAYS, 3), ttl_paste: num(env.PASTE_TTL_DAYS, 1) },
 		max_ttl_days: num(env.MAX_TTL_DAYS, 7),
-		daily_bytes: { diag: num(env.DAILY_MAX_BYTES, 104857600), paste: num(env.PASTE_DAILY_MAX_BYTES, 20971520) },
-		db_limit_bytes: 524288000,
 	});
 }
 

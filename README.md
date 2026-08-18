@@ -60,7 +60,7 @@ implementation instead of two that drift.
 ```sh
 node tests/unit.mjs   # 111 checks, ~instant
 tests/smoke.sh        # 291 checks over 13 wrangler dev instances
-tests/web.sh          # 25 checks in Chromium, both auth modes
+tests/web.sh          # 24 checks in Chromium, both auth modes
 ```
 
 The smoke suite covers every route, both gates, the D1 blob round trip at a realistic
@@ -219,9 +219,7 @@ expiry of something already accepted would move a deletion date its submitter wa
 
 **Nothing can be made permanent.** There is no path that exempts a report from expiry, so
 the working set can never exceed the daily byte budget times the retention window, which is
-what makes storage provably bounded. That product is the arithmetic the portal shows beside the
-two selects, against the 500 MiB database ceiling, so the cost of a longer window is stated
-where it is chosen rather than discovered at the limit. If a log needs to outlive its window, download it and
+what makes storage provably bounded. If a log needs to outlive its window, download it and
 attach it to the issue, where the discussion already lives.
 
 An `events` table records what happened, kept for **7 days** (`ABUSE_TTL_DAYS`) and

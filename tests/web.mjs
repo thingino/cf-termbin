@@ -215,7 +215,6 @@ if (MODE === 'token') {
 			await p.waitForSelector('#ttlDiag option', { state: 'attached', timeout: 20000 });
 			const before = await p.locator('#ttlPaste').inputValue();
 			await p.selectOption('#ttlDiag', '7');
-			const noted = await p.locator('#ttlNote').textContent();
 			await p.click('#saveTtl');
 			await p.waitForFunction(() => document.querySelector('#ttlMsg').textContent === 'saved', { timeout: 20000 });
 			// Reload rather than trust the page: the value has to have reached the database.
@@ -224,7 +223,6 @@ if (MODE === 'token') {
 			const after = {
 				diag: await p.locator('#ttlDiag').inputValue(),
 				paste: await p.locator('#ttlPaste').inputValue(),
-				noted,
 			};
 			// Put it back, so a suite run leaves no setting behind.
 			await p.selectOption('#ttlDiag', '3');
@@ -236,11 +234,6 @@ if (MODE === 'token') {
 	const t = ttl.actResult || {};
 	ok('a retention window survives a reload', t.after?.diag === '7', JSON.stringify(t.after));
 	ok('and the other kind is left alone', t.after?.paste === t.before, `${t.before} -> ${t.after?.paste}`);
-	ok(
-		'the storage arithmetic follows the select, not the saved value',
-		(t.after?.noted || '').includes('× 7'),
-		t.after?.noted,
-	);
 	ok('it can be set back', t.restored === '3', String(t.restored));
 } else {
 	console.log('-- builder mode: login and revocation both belong to the builder');

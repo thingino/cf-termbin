@@ -242,31 +242,13 @@ async function toggleKill() {
 	}
 }
 
-// Retention, and what the choice costs. The worst case is the daily byte budget times the
-// window, which is exactly the arithmetic that keeps storage bounded, so the page states it
-// rather than letting an admin find the ceiling the hard way.
-let TTL = null;
-
-const mib = (n) => n / 1048576;
-
-function ttlNote() {
-	if (!TTL) return;
-	const d = Number($('#ttlDiag').value);
-	const p = Number($('#ttlPaste').value);
-	const worst = mib(TTL.daily_bytes.diag) * d + mib(TTL.daily_bytes.paste) * p;
-	const limit = mib(TTL.db_limit_bytes);
-	const el = $('#ttlNote');
-	el.textContent =
-		`Worst case at these windows: ${mib(TTL.daily_bytes.diag).toFixed(0)} MiB/day × ${d} + ` +
-		`${mib(TTL.daily_bytes.paste).toFixed(0)} MiB/day × ${p} = ${worst.toFixed(0)} MiB, ` +
-		`against a ${limit.toFixed(0)} MiB database ceiling.`;
-	el.className = worst > limit ? 'small text-danger mt-2' : 'small muted mt-2';
-}
-
+// Retention, one window per kind.
 async function loadTtl() {
 	const d = await api('/admin/settings');
-	TTL = d;
-	for (const [sel, val] of [['#ttlDiag', d.ttl_diag], ['#ttlPaste', d.ttl_paste]]) {
+	for (const [sel, val] of [
+		['#ttlDiag', d.ttl_diag],
+		['#ttlPaste', d.ttl_paste],
+	]) {
 		const el = $(sel);
 		el.replaceChildren();
 		for (const c of d.choices) {
@@ -276,9 +258,7 @@ async function loadTtl() {
 			el.appendChild(o);
 		}
 		el.value = String(val);
-		el.onchange = ttlNote;
 	}
-	ttlNote();
 }
 
 async function saveTtl() {
