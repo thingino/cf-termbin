@@ -25,11 +25,11 @@ let key = sessionStorage.getItem(KEY) || '';
 const fmtBytes = (n) =>
 	n < 1024 ? n + ' B' : n < 1048576 ? (n / 1024).toFixed(1) + ' KiB' : (n / 1048576).toFixed(2) + ' MiB';
 
-// Always 24 hour and zero padded, which is the one place these deliberately part company with
-// the builder: it passes no options, so an en-US viewer gets 1:41:41 AM there. `hourCycle` and
-// not `hour12:false`, because that is defined as the locale's preferred 24 hour cycle and so
-// can render midnight as 24:00:12; h23 pins the hour to 00-23. Locale still decides field
-// order, so a date stays dd/mm in en-GB and mm/dd in en-US.
+// Always 24 hour and zero padded, the same shape the builder's portal uses so the two read
+// alike. `hourCycle:'h23'` rather than `hour12:false`: on current ICU both resolve to h23 in
+// every locale, but h23 asks for it outright instead of inheriting whatever the locale's
+// preferred 24 hour cycle is, and the other one, h24, renders midnight as 24:00:12. Locale
+// still decides field order, so a date stays dd/mm in en-GB and mm/dd in en-US.
 const HMS = { hourCycle: 'h23', hour: '2-digit', minute: '2-digit', second: '2-digit' };
 const YMD = { year: 'numeric', month: '2-digit', day: '2-digit' };
 
@@ -464,7 +464,7 @@ async function refresh() {
 	show($('#err'), '');
 	try {
 		await Promise.all([loadStats(), loadTtl(), loadReports(), loadEvents($('#ip').value.trim())]);
-		$('#updated').textContent = 'updated ' + new Date().toLocaleTimeString();
+		$('#updated').textContent = 'updated ' + new Date().toLocaleTimeString([], HMS);
 	} catch (e) {
 		show($('#err'), e.message, true);
 	}
