@@ -128,6 +128,7 @@ async function run({ modeDelay, fill, act }) {
 	// enter() fires refresh() without awaiting it, so wait for the timestamp it sets last.
 	let rows = 0;
 	let listErr = '';
+	let actResult;
 	if (signedIn) {
 		await page
 			.waitForFunction(() => (document.querySelector('#updated').textContent || '').length > 0, { timeout: 20000 })
@@ -136,11 +137,11 @@ async function run({ modeDelay, fill, act }) {
 			const t = document.querySelector('#reports tbody');
 			return { rows: t ? t.rows.length : 0, listErr: (document.querySelector('#err') || {}).textContent || '' };
 		}));
-		if (act) await act(page);
+		if (act) actResult = await act(page);
 	}
 
 	await ctx.close();
-	return { signedIn, gateErr, rows, listErr, builderHits, hitsAtSignin, offsite, errors };
+	return { signedIn, gateErr, rows, listErr, builderHits, hitsAtSignin, offsite, errors, actResult };
 }
 
 const leaks = (hits, secret) => hits.filter((h) => h.auth.includes(secret) || h.body.includes(secret));
@@ -205,6 +206,42 @@ if (MODE === 'token') {
 		settled.builderHits.length === 0,
 		settled.builderHits.map((h) => `${h.path} auth=${h.auth}`).join('; '),
 	);
+	// Retention is set here rather than at deploy, so the page is where it can go wrong: a
+	// select that posts the other kind's value, or a saved value that does not survive a reload.
+	const ttl = await run({
+		modeDelay: 0,
+		fill: (p) => p.fill('#p', KEY),
+		act: async (p) => {
+			await p.waitForSelector('#ttlDiag option', { state: 'attached', timeout: 20000 });
+			const before = await p.locator('#ttlPaste').inputValue();
+			await p.selectOption('#ttlDiag', '7');
+			const noted = await p.locator('#ttlNote').textContent();
+			await p.click('#saveTtl');
+			await p.waitForFunction(() => document.querySelector('#ttlMsg').textContent === 'saved', { timeout: 20000 });
+			// Reload rather than trust the page: the value has to have reached the database.
+			await p.reload({ waitUntil: 'domcontentloaded' });
+			await p.waitForFunction(() => document.querySelector('#ttlDiag').value !== '', { timeout: 20000 });
+			const after = {
+				diag: await p.locator('#ttlDiag').inputValue(),
+				paste: await p.locator('#ttlPaste').inputValue(),
+				noted,
+			};
+			// Put it back, so a suite run leaves no setting behind.
+			await p.selectOption('#ttlDiag', '3');
+			await p.click('#saveTtl');
+			await p.waitForFunction(() => document.querySelector('#ttlMsg').textContent === 'saved', { timeout: 20000 });
+			return { before, after, restored: await p.locator('#ttlDiag').inputValue() };
+		},
+	});
+	const t = ttl.actResult || {};
+	ok('a retention window survives a reload', t.after?.diag === '7', JSON.stringify(t.after));
+	ok('and the other kind is left alone', t.after?.paste === t.before, `${t.before} -> ${t.after?.paste}`);
+	ok(
+		'the storage arithmetic follows the select, not the saved value',
+		(t.after?.noted || '').includes('× 7'),
+		t.after?.noted,
+	);
+	ok('it can be set back', t.restored === '3', String(t.restored));
 } else {
 	console.log('-- builder mode: login and revocation both belong to the builder');
 

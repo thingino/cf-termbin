@@ -4,6 +4,7 @@ import { sha256hex, constantTimeEqual } from './crypto.js';
 import { parseEnvelope, scanShape, SHAPE_DEFAULTS } from './envelope.js';
 import { textResponse, jsonResponse, pasteResponse, notFound } from './respond.js';
 import { adminIdentity, authMode } from './auth.js';
+import { TTL_CHOICES, readSettings, writeSettings, ttlFor } from './settings.js';
 
 export { DailyBudget };
 
@@ -73,6 +74,9 @@ function ensureSchema(env) {
 				env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts)'),
 				env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_events_exp ON events(exp)'),
 				env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_events_ip ON events(ip)'),
+				// Runtime settings, currently the two retention windows. Small and rarely written, so
+				// a key/value table rather than columns that would need a migration each time.
+				env.DB.prepare('CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)'),
 			]);
 
 			// CREATE TABLE IF NOT EXISTS will not alter a table an earlier version
@@ -164,6 +168,7 @@ export default {
 		// collide with a report path.
 		if (segments[0] === 'admin' && segments.length === 2 && ADMIN_API.has(segments[1]) && request.method === 'GET') {
 			if (segments[1] === 'events') return withCors(await events(request, env, url), env);
+			if (segments[1] === 'settings') return withCors(await getSettings(request, env), env);
 			if (segments[1] === 'stats') return withCors(await stats(request, env), env);
 			if (segments[1] === 'reports') return withCors(await reports(request, env, url), env);
 		}
@@ -177,6 +182,10 @@ export default {
 			(segments[1] === 'reports' || segments[1] === 'events')
 		) {
 			return withCors(await purge(request, env, url, segments[1]), env);
+		}
+
+		if (segments[0] === 'admin' && segments.length === 2 && segments[1] === 'settings' && request.method === 'POST') {
+			return withCors(await postSettings(request, env), env);
 		}
 
 		if (segments[0] === 'admin' && segments.length === 2 && segments[1] === 'pause' && request.method === 'POST') {
@@ -306,6 +315,64 @@ async function pause(request, env, url) {
 // has to. That is honest about a partial result rather than appearing to finish.
 const PURGE_BATCHES = 20;
 
+// What the two retention windows are, what they may be set to, and what the choice costs in
+// storage. The worst case is the daily byte budget times the window, which is the whole reason
+// the budget exists, so the page can show it rather than an admin discovering it at the ceiling.
+async function getSettings(request, env) {
+	if (!(await adminIdentity(request, env))) return notFound();
+	await ensureSchema(env);
+	const s = await readSettings(env, { fresh: true });
+	return jsonResponse(200, {
+		ttl_diag: ttlFor('diag', s, env, num),
+		ttl_paste: ttlFor('paste', s, env, num),
+		choices: TTL_CHOICES,
+		// What applies when nothing is stored, which comes from the deployment rather than here.
+		defaults: { ttl_diag: num(env.TTL_DAYS, 3), ttl_paste: num(env.PASTE_TTL_DAYS, 1) },
+		max_ttl_days: num(env.MAX_TTL_DAYS, 7),
+		daily_bytes: { diag: num(env.DAILY_MAX_BYTES, 104857600), paste: num(env.PASTE_DAILY_MAX_BYTES, 20971520) },
+		db_limit_bytes: 524288000,
+	});
+}
+
+async function postSettings(request, env) {
+	const who = await adminIdentity(request, env);
+	if (!who) return notFound();
+	await ensureSchema(env);
+
+	let body;
+	try {
+		body = await request.json();
+	} catch {
+		return textResponse(400, 'expected json\n');
+	}
+
+	// Either window may be sent alone, so a page that only changes one does not have to restate
+	// the other and race whoever changed it in between.
+	const patch = {};
+	for (const field of ['ttl_diag', 'ttl_paste']) {
+		if (body[field] === undefined) continue;
+		const v = Number(body[field]);
+		// A closed set, checked here rather than trusted from the page: the select is a
+		// convenience, not the boundary.
+		if (!TTL_CHOICES.includes(v)) return textResponse(400, `${field} must be one of ${TTL_CHOICES.join(', ')}\n`);
+		patch[field] = String(v);
+	}
+	if (!Object.keys(patch).length) return textResponse(400, 'nothing to change\n');
+
+	await writeSettings(env, patch);
+	const s = await readSettings(env, { fresh: true });
+	await logEvent(env, 'settings', {
+		admin: who,
+		detail: Object.entries(patch)
+			.map(([k, v]) => `${k === 'ttl_diag' ? 'diag' : 'paste'} kept ${v} day${v === '1' ? '' : 's'}`)
+			.join(', '),
+	});
+	return jsonResponse(200, {
+		ttl_diag: ttlFor('diag', s, env, num),
+		ttl_paste: ttlFor('paste', s, env, num),
+	});
+}
+
 async function purge(request, env, url, what) {
 	// Auth first, so an unauthenticated caller sees the same 404 as any unknown path and
 	// cannot tell this endpoint exists.
@@ -349,7 +416,7 @@ async function purge(request, env, url, what) {
 }
 
 // Endpoint names under /admin that belong to the API rather than to the static portal.
-const ADMIN_API = new Set(['mode', 'stats', 'reports', 'events']);
+const ADMIN_API = new Set(['mode', 'stats', 'reports', 'events', 'settings']);
 
 // Serves the portal from this origin by fetching it from wherever it is published, which
 // for this deployment is GitHub Pages. The assets are not embedded in the Worker: the
@@ -584,10 +651,10 @@ async function submit(request, env, url) {
 		);
 	}
 
-	const ttlDays =
-		kind === 'diag'
-			? Math.min(num(env.TTL_DAYS, 3), num(env.MAX_TTL_DAYS, 3))
-			: Math.min(num(env.PASTE_TTL_DAYS, 1), num(env.MAX_TTL_DAYS, 3));
+	// Per kind, and set by an admin rather than at deploy. Changing it moves only what is stored
+	// afterwards: an existing row keeps the expiry it was written with, because rewriting the
+	// expiry of something already accepted would move a deletion date the submitter was told.
+	const ttlDays = ttlFor(kind, await readSettings(env), env, num);
 	const now = Math.floor(Date.now() / 1000);
 	const exp = now + ttlDays * 86400;
 	const token = newToken();
@@ -932,7 +999,7 @@ async function reports(request, env, url) {
 	return jsonResponse(200, {
 		count: rows.results.length,
 		total: all?.n ?? 0,
-		retention_days: Math.min(num(env.TTL_DAYS, 3), num(env.MAX_TTL_DAYS, 3)),
+		retention_days: ttlFor('diag', await readSettings(env), env, num),
 		reports: rows.results.map((r) => ({
 			slug: r.slug,
 			kind: r.kind,

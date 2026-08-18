@@ -242,6 +242,65 @@ async function toggleKill() {
 	}
 }
 
+// Retention, and what the choice costs. The worst case is the daily byte budget times the
+// window, which is exactly the arithmetic that keeps storage bounded, so the page states it
+// rather than letting an admin find the ceiling the hard way.
+let TTL = null;
+
+const mib = (n) => n / 1048576;
+
+function ttlNote() {
+	if (!TTL) return;
+	const d = Number($('#ttlDiag').value);
+	const p = Number($('#ttlPaste').value);
+	const worst = mib(TTL.daily_bytes.diag) * d + mib(TTL.daily_bytes.paste) * p;
+	const limit = mib(TTL.db_limit_bytes);
+	const el = $('#ttlNote');
+	el.textContent =
+		`Worst case at these windows: ${mib(TTL.daily_bytes.diag).toFixed(0)} MiB/day × ${d} + ` +
+		`${mib(TTL.daily_bytes.paste).toFixed(0)} MiB/day × ${p} = ${worst.toFixed(0)} MiB, ` +
+		`against a ${limit.toFixed(0)} MiB database ceiling.`;
+	el.className = worst > limit ? 'small text-danger mt-2' : 'small muted mt-2';
+}
+
+async function loadTtl() {
+	const d = await api('/admin/settings');
+	TTL = d;
+	for (const [sel, val] of [['#ttlDiag', d.ttl_diag], ['#ttlPaste', d.ttl_paste]]) {
+		const el = $(sel);
+		el.replaceChildren();
+		for (const c of d.choices) {
+			const o = document.createElement('option');
+			o.value = String(c);
+			o.textContent = c === 1 ? '1 day' : `${c} days`;
+			el.appendChild(o);
+		}
+		el.value = String(val);
+		el.onchange = ttlNote;
+	}
+	ttlNote();
+}
+
+async function saveTtl() {
+	const msg = $('#ttlMsg');
+	msg.textContent = 'saving…';
+	msg.className = 'small muted ms-auto';
+	try {
+		const r = await fetch(API + '/admin/settings', {
+			method: 'POST',
+			headers: { authorization: 'Bearer ' + key, 'content-type': 'application/json' },
+			body: JSON.stringify({ ttl_diag: Number($('#ttlDiag').value), ttl_paste: Number($('#ttlPaste').value) }),
+		});
+		if (!r.ok) throw new Error((await r.text()).trim() || 'HTTP ' + r.status);
+		msg.textContent = 'saved';
+		msg.className = 'small text-success ms-auto';
+		await loadTtl();
+	} catch (e) {
+		msg.textContent = e.message;
+		msg.className = 'small text-danger ms-auto';
+	}
+}
+
 async function loadStats() {
 	const s = await api('/admin/stats');
 	lastCounts.reports = s.reports.total;
@@ -424,7 +483,7 @@ async function refresh() {
 	closeConfirm(false);
 	show($('#err'), '');
 	try {
-		await Promise.all([loadStats(), loadReports(), loadEvents($('#ip').value.trim())]);
+		await Promise.all([loadStats(), loadTtl(), loadReports(), loadEvents($('#ip').value.trim())]);
 		$('#updated').textContent = 'updated ' + new Date().toLocaleTimeString();
 	} catch (e) {
 		show($('#err'), e.message, true);
@@ -612,6 +671,7 @@ window.addEventListener('DOMContentLoaded', () => {
 	};
 	$('#refresh').onclick = refresh;
 	$('#kill-btn').onclick = toggleKill;
+	$('#saveTtl').onclick = saveTtl;
 	$('#purgeReports').onclick = () => purge('reports', 'reports', lastCounts.reports);
 	$('#purgeEvents').onclick = () => purge('events', 'log entries', lastCounts.events);
 	$('#findForm').addEventListener('submit', (e) => {

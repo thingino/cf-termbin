@@ -69,9 +69,9 @@ SLUG_LEN = "8"                 # 40 bits; sized by hit density, see src/slug.js
 # report that is trimmed and then refused anyway.
 MAX_BYTES = "524288"
 TTL_DAYS = "3"
-MAX_TTL_DAYS = "3"
+MAX_TTL_DAYS = "7"             # ceiling on what an admin may choose in /admin/
 DAILY_MAX = "2000"             # report count, secondary guard
-DAILY_MAX_BYTES = "104857600"  # 100 MB/day, so 300 MB steady state at 3 days
+DAILY_MAX_BYTES = "104857600"  # 100 MB/day; times the retention window is the worst case
 PASTE_TTL_DAYS = "1"           # anything that is not a recognised report expires sooner
 PASTE_DAILY_MAX = "200"        # and get their own, smaller allowance
 PASTE_DAILY_MAX_BYTES = "20971520"

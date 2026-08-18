@@ -455,6 +455,31 @@ body_has "json has url" '"url"'
 body_has "json has delete_token" '"delete_token"'
 body_has "json has expires" '"expires"'
 
+echo "-- retention is an admin setting, per kind"
+check "settings need a credential" 404 "${BASE}/admin/settings"
+check "settings with a credential" 200 -H "Authorization: Bearer ${ADMIN}" "${BASE}/admin/settings"
+body_has "it states the diag window" '"ttl_diag"'
+body_has "and the paste window" '"ttl_paste"'
+# A closed set, checked at the Worker rather than trusted from the page.
+check "an unlisted window is refused" 400 -X POST -H "Authorization: Bearer ${ADMIN}" -H 'content-type: application/json' \
+  --data '{"ttl_diag":4}' "${BASE}/admin/settings"
+body_has "and says which are allowed" "1, 3, 5, 7"
+check "a listed one is accepted" 200 -X POST -H "Authorization: Bearer ${ADMIN}" -H 'content-type: application/json' \
+  --data '{"ttl_diag":5,"ttl_paste":3}' "${BASE}/admin/settings"
+body_has "diag window saved" '"ttl_diag": 5'
+body_has "paste window saved" '"ttl_paste": 3'
+# The point of the setting: a report submitted now must carry the new expiry.
+check "a diag report takes the new window" 201 -H "Accept: application/json" "${CH[@]}" --data-binary "$(report 'ttl check')" "${BASE}/"
+body_has "5 days, not the deploy default" '"ttl_days": 5'
+check "a paste takes its own window" 201 -H "Accept: application/json" "${CH[@]}" --data-binary "$(printf 'ttl paste check\nordinary output\n')" "${BASE}/"
+body_has "3 days, set separately from diag" '"ttl_days": 3'
+check "the listing advertises the diag window" 200 -H "Authorization: Bearer ${ADMIN}" "${BASE}/admin/reports?limit=1"
+body_has "as the retention it reports" '"retention_days": 5'
+# Put it back, so later expiry checks are not reasoning about a window this section changed.
+check "restore the defaults" 200 -X POST -H "Authorization: Bearer ${ADMIN}" -H 'content-type: application/json' \
+  --data '{"ttl_diag":3,"ttl_paste":1}' "${BASE}/admin/settings"
+body_has "and the change is logged" '"ttl_diag": 3'
+
 echo "-- event log (admin only, outlives the report)"
 ABSLUG="$(submit_slug abuse "$(report 'abuse record test')")"
 check "event log needs admin" 404 "${BASE}/admin/events"

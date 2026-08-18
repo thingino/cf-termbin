@@ -15,6 +15,7 @@ see [Run your own](#run-your-own).
 src/index.js       routes, submit and view pipelines, cron reclaimer
 src/envelope.js    the format gate and the payload shape scanner
 src/auth.js        admin auth: builder session, shared key, or disabled
+src/settings.js    the two retention windows, settable at runtime
 src/budget.js      Durable Object, per-kind daily report and byte counters
 src/slug.js        slug and token generation
 src/crypto.js      sha256hex and a constant-time compare, shared by both callers
@@ -58,8 +59,8 @@ implementation instead of two that drift.
 
 ```sh
 node tests/unit.mjs   # 111 checks, ~instant
-tests/smoke.sh        # 274 checks over 13 wrangler dev instances
-tests/web.sh          # 21 checks in Chromium, both auth modes
+tests/smoke.sh        # 291 checks over 13 wrangler dev instances
+tests/web.sh          # 25 checks in Chromium, both auth modes
 ```
 
 The smoke suite covers every route, both gates, the D1 blob round trip at a realistic
@@ -205,19 +206,27 @@ bisecting accepted against refused.
 
 ## What is stored
 
-The report itself, for `TTL_DAYS` (3) or `PASTE_TTL_DAYS` (1), then the cron reclaims it.
-Beside it only what is needed to serve and expire it: size, kind and the hash of the delete
-token. Nothing is lifted out of the body into a column of its own.
+The report itself, for as long as its kind is kept, then the cron reclaims it. Beside it only
+what is needed to serve and expire it: size, kind and the hash of the delete token. Nothing is
+lifted out of the body into a column of its own.
+
+The two windows are set in the portal, independently, to 1, 3, 5 or 7 days: a diagnostic report
+is the thing this bin exists for and someone may need a few days to reach it, while a paste is
+casual and its shorter leash is what keeps the permissive door from being the expensive one.
+`TTL_DAYS` and `PASTE_TTL_DAYS` are what applies until an admin chooses, and `MAX_TTL_DAYS`
+caps the choice. Changing a window moves only what is stored afterwards, because rewriting the
+expiry of something already accepted would move a deletion date its submitter was told.
 
 **Nothing can be made permanent.** There is no path that exempts a report from expiry, so
 the working set can never exceed the daily byte budget times the retention window, which is
-what makes storage provably bounded. If a log needs to outlive its window, download it and
+what makes storage provably bounded. That product is the arithmetic the portal shows beside the
+two selects, against the 500 MiB database ceiling, so the cost of a longer window is stated
+where it is chosen rather than discovered at the limit. If a log needs to outlive its window, download it and
 attach it to the issue, where the discussion already lives.
 
 An `events` table records what happened, kept for **7 days** (`ABUSE_TTL_DAYS`) and
 separate from the report row on purpose: that window is longer than the retention window,
-so a column on `pastes` would be reclaimed with the report at 3 days and never reach a
-week. One row per accepted submission, per admin action and per reclaim run:
+so a column on `pastes` would be reclaimed with the report and never reach a week. One row per accepted submission, per admin action and per reclaim run:
 
 | kind | written when |
 | --- | --- |
@@ -227,6 +236,7 @@ week. One row per accepted submission, per admin action and per reclaim run:
 | `purge_events` | the log itself is cleared, logged *after* the deletes so it survives |
 | `paused` / `resumed` | the kill switch is used |
 | `reap` | the cron expires something, skipped entirely when it finds nothing |
+| `settings` | a retention window is changed, naming the admin and the new value |
 
 Admin logins are not in that table, because they do not happen here: this Worker never sees a
 password or a code. In builder mode the listing reads `admin_login_ok`, `admin_login_fail` and
@@ -254,6 +264,14 @@ curl -H "Authorization: Bearer $SESSION" "$BIN/admin/events?slug=<slug>"
 curl -H "Authorization: Bearer $SESSION" "$BIN/admin/events?limit=20"
 ```
 
+Retention is on the same credential, and either window may be sent alone:
+
+```sh
+curl -H "Authorization: Bearer $SESSION" $BIN/admin/settings
+curl -H "Authorization: Bearer $SESSION" -H 'content-type: application/json' \
+     -d '{"ttl_diag":5}' $BIN/admin/settings
+```
+
 ## Configuration
 
 `[vars]` in `wrangler.toml`:
@@ -267,9 +285,9 @@ curl -H "Authorization: Bearer $SESSION" "$BIN/admin/events?limit=20"
 | `ALLOW_ORIGIN` | `""` | empty because the portal is same-origin. Set an exact origin only if you host it elsewhere; never a wildcard |
 | `SLUG_LEN` | `8` | slug characters; validation accepts 4-26 so changing it never 404s old links |
 | `MAX_BYTES` | `524288` | 512 KiB; the largest real report is 410 KB, and this bounds the shape scan inside the 10 ms CPU budget |
-| `TTL_DAYS` | `3` | retention for recognised reports, clamped by `MAX_TTL_DAYS` |
-| `MAX_TTL_DAYS` | `3` | ceiling on the above |
-| `PASTE_TTL_DAYS` | `1` | retention for anything else; shorter on purpose |
+| `TTL_DAYS` | `3` | retention for recognised reports until an admin sets one, clamped by `MAX_TTL_DAYS` |
+| `MAX_TTL_DAYS` | `7` | ceiling on both windows, including what the portal may choose |
+| `PASTE_TTL_DAYS` | `1` | the same for anything else; shorter on purpose |
 | `DAILY_MAX` | `2000` | reports per day, secondary guard |
 | `DAILY_MAX_BYTES` | `104857600` | bytes per day; this is what bounds the database |
 | `PASTE_DAILY_MAX` | `200` | separate, smaller allowance for non-report submissions |
