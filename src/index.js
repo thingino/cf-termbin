@@ -25,13 +25,17 @@ const limitParam = (url, fallback = 50, max = 500) =>
 	Math.max(1, Math.min(Math.trunc(num(url.searchParams.get('limit'), fallback)), max));
 
 // Created on first use rather than as a deploy step, so there is no migration to
-// forget. One query on a cold isolate, against a 50-query-per-invocation budget.
+// forget. One round trip on a cold isolate: the CREATEs and a probe of the live columns
+// share a batch, and a migration below runs only when the probe says its table needs it.
+// Traffic here is sparse enough that a request often lands on a cold isolate, and each D1
+// round trip costs this Worker about 0.5 ms of CPU against the free plan's 10 ms, so
+// re-running every migration in turn cost such a request ~4 ms.
 let schemaReady = null;
 
 function ensureSchema(env) {
 	if (!schemaReady) {
 		schemaReady = (async () => {
-			await env.DB.batch([
+			const created = await env.DB.batch([
 				env.DB.prepare(`CREATE TABLE IF NOT EXISTS pastes (
 					slug     TEXT PRIMARY KEY,
 					created  INTEGER NOT NULL,
@@ -77,25 +81,35 @@ function ensureSchema(env) {
 				// Runtime settings, currently the two retention windows. Small and rarely written, so
 				// a key/value table rather than columns that would need a migration each time.
 				env.DB.prepare('CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)'),
+				// Last, so it sees the tables as the statements above left them.
+				env.DB.prepare(
+					`SELECT (SELECT group_concat(name) FROM pragma_table_info('pastes')) pastes,
+					        (SELECT group_concat(name) FROM pragma_table_info('submissions')) submissions,
+					        EXISTS (SELECT 1 FROM events) has_events`,
+				),
 			]);
+			const probe = created[created.length - 1].results[0] || {};
+			const pastes = new Set(String(probe.pastes || '').split(','));
+			const submissions = new Set(String(probe.submissions || '').split(','));
 
 			// CREATE TABLE IF NOT EXISTS will not alter a table an earlier version
 			// already made, so new columns are added separately and idempotently.
 			// Kept out of the batch above because one failing statement fails the lot.
-			for (const sql of [
-				'ALTER TABLE pastes ADD COLUMN kind TEXT',
+			// The error check stays for two cold isolates racing to apply the same one.
+			for (const [needed, sql] of [
+				[!pastes.has('kind'), 'ALTER TABLE pastes ADD COLUMN kind TEXT'],
 				// Dropped rather than left to age out: they held hardware and build identity for
 				// every report, which is a device inventory a paste bin has no business keeping.
-				// A failure here just means the table never had them.
-				'ALTER TABLE pastes DROP COLUMN soc',
-				'ALTER TABLE pastes DROP COLUMN build',
-				'ALTER TABLE pastes DROP COLUMN model',
+				[pastes.has('soc'), 'ALTER TABLE pastes DROP COLUMN soc'],
+				[pastes.has('build'), 'ALTER TABLE pastes DROP COLUMN build'],
+				[pastes.has('model'), 'ALTER TABLE pastes DROP COLUMN model'],
 				// Held the censor ruleset a report declared. Nothing ever declared one.
-				'ALTER TABLE pastes DROP COLUMN redacted',
+				[pastes.has('redacted'), 'ALTER TABLE pastes DROP COLUMN redacted'],
 				// Added after the fact, so existing rows read null and the portal shows no flag
 				// for them rather than a wrong one.
-				'ALTER TABLE submissions ADD COLUMN country TEXT',
+				[!submissions.has('country'), 'ALTER TABLE submissions ADD COLUMN country TEXT'],
 			]) {
+				if (!needed) continue;
 				try {
 					await env.DB.prepare(sql).run();
 				} catch (err) {
@@ -109,8 +123,7 @@ function ensureSchema(env) {
 			// second attempt after the first succeeded would duplicate every row. `submissions`
 			// is deliberately left in place and still reaped, so this is not the only copy
 			// until its 7 day window has passed.
-			const logged = await env.DB.prepare('SELECT COUNT(*) n FROM events').first();
-			if ((logged?.n ?? 0) === 0) {
+			if (!probe.has_events) {
 				const moved = await env.DB.prepare(
 					`INSERT INTO events (ts, kind, slug, ip, country, exp)
 					 SELECT created, 'submit', slug, ip, country, exp FROM submissions`,
