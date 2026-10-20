@@ -591,8 +591,22 @@ async function submit(request, env, url) {
 	if (bytes.byteLength === 0) return textResponse(400, 'empty body\n');
 
 	// Logs routinely carry bytes that are not valid UTF-8 (dmesg ring, binary
-	// junk), so scan a lossy decode.
-	const text = new TextDecoder('utf-8', { fatal: false }).decode(bytes);
+	// junk), so scan a lossy decode. Most reports are valid UTF-8 throughout, though, and
+	// for those an exact decode is also the form they are stored in (see insert). It keeps
+	// a byte-order mark, so the bytes read back unchanged, and the scan gets the text
+	// without one, exactly as the lossy decode would have handed it over.
+	let exact = null;
+	try {
+		exact = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes);
+	} catch {
+		// Not valid UTF-8: stored as raw bytes, as everything used to be.
+	}
+	const text =
+		exact === null
+			? new TextDecoder('utf-8', { fatal: false }).decode(bytes)
+			: exact.charCodeAt(0) === 0xfeff
+				? exact.slice(1)
+				: exact;
 
 	// The client id is required for everything, diag reports included. Nothing is
 	// accepted from a caller that has not identified itself as a thingino device, so
@@ -677,6 +691,9 @@ async function submit(request, env, url) {
 		tok: tokenHash,
 		kind,
 		body: bytes,
+		// A NUL stays on the raw-bytes path: valid UTF-8, but not something to trust a text
+		// column with when bytes already store it exactly.
+		text: exact !== null && !exact.includes('\0') ? exact : null,
 		// Kept for abuse follow-up only, on its own week-long clock. Written in the
 		// same batch as the report so a submission can never be recorded without its
 		// report, or the other way round.
@@ -745,9 +762,16 @@ async function insert(env, row, slugLen) {
 					row.size,
 					row.tok,
 					row.kind,
+					// Text when the report decoded exactly (see submit), raw bytes otherwise. The
+					// difference is CPU: D1's binding turns an ArrayBuffer into a JavaScript array of
+					// one number per byte and serialises that as JSON, measured at ~23 ms for a
+					// 390 KiB report against ~4 ms for the same report as a string, and reading it
+					// back costs ~10 ms against ~2. The column is declared BLOB, which keeps either
+					// as given, so rows stored as bytes read back exactly as before.
+					//
 					// readLimited and TextEncoder both hand back exactly sized arrays, so
 					// the backing buffer is the payload and nothing else.
-					row.body.buffer,
+					row.text ?? row.body.buffer,
 				),
 				// In the same batch as the report, so a stored report always has its event and a
 				// failed insert leaves neither. `detail` carries the report kind and size, which
@@ -807,8 +831,10 @@ async function view(request, env, slug) {
 	// `size` was selected for the HEAD path and then dropped, so a HEAD answered without
 	// a length and told a caller nothing a GET would not. Set it explicitly: with a null
 	// body the runtime has nothing to derive it from.
+	// A report stored as text goes out as the string: the runtime encodes it back to the
+	// exact bytes that came in, with no per-byte work here.
 	return pasteResponse(
-		headOnly ? null : toBytes(row.body),
+		headOnly ? null : typeof row.body === 'string' ? row.body : toBytes(row.body),
 		Number(row.exp || 0),
 		headOnly ? { 'content-length': String(Number(row.size || 0)) } : {},
 	);
