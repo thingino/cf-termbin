@@ -237,41 +237,40 @@ export default {
 	// Bounded per tick: a DELETE of many ~430 KiB rows would otherwise risk the
 	// 30 second query ceiling.
 	async scheduled(event, env) {
-		await ensureSchema(env);
-		const now = Math.floor(Date.now() / 1000);
-		const batch = num(env.RECLAIM_BATCH, 50);
+		try {
+			await ensureSchema(env);
+			const now = Math.floor(Date.now() / 1000);
+			const batch = num(env.RECLAIM_BATCH, 50);
 
-		const reports = await env.DB.prepare(
-			'DELETE FROM pastes WHERE slug IN (SELECT slug FROM pastes WHERE exp < ? LIMIT ?)',
-		)
-			.bind(now, batch)
-			.run();
+			// One round trip for all three. Each keeps its own cutoff, so a submission record
+			// outlives the report it points at.
+			const [reports, records, logs] = await env.DB.batch([
+				env.DB.prepare('DELETE FROM pastes WHERE slug IN (SELECT slug FROM pastes WHERE exp < ? LIMIT ?)').bind(now, batch),
+				env.DB.prepare('DELETE FROM submissions WHERE slug IN (SELECT slug FROM submissions WHERE exp < ? LIMIT ?)').bind(now, batch),
+				env.DB.prepare('DELETE FROM events WHERE id IN (SELECT id FROM events WHERE exp < ? LIMIT ?)').bind(now, batch),
+			]);
 
-		// Its own cutoff, so a submission record outlives the report it points at.
-		const records = await env.DB.prepare(
-			'DELETE FROM submissions WHERE slug IN (SELECT slug FROM submissions WHERE exp < ? LIMIT ?)',
-		)
-			.bind(now, batch)
-			.run();
-
-		const logs = await env.DB.prepare('DELETE FROM events WHERE id IN (SELECT id FROM events WHERE exp < ? LIMIT ?)')
-			.bind(now, batch)
-			.run();
-
-		const nReports = reports.meta?.changes ?? 0;
-		const nRecords = records.meta?.changes ?? 0;
-		const nLogs = logs.meta?.changes ?? 0;
-		console.log(
-			`reclaim: ${nReports} report(s), ${nRecords} abuse record(s), ${nLogs} event(s), db size now ${logs.meta?.size_after ?? '?'} bytes`,
-		);
-		// Only when it actually reclaimed something. A tick that finds nothing to do is the
-		// normal case and logging it would bury the rest under 96 rows a day.
-		if (nReports || nRecords || nLogs) {
-			const parts = [];
-			if (nReports) parts.push(`${nReports} report${nReports === 1 ? '' : 's'}`);
-			if (nRecords) parts.push(`${nRecords} record${nRecords === 1 ? '' : 's'}`);
-			if (nLogs) parts.push(`${nLogs} event${nLogs === 1 ? '' : 's'}`);
-			await logEvent(env, 'reap', { detail: `expired ${parts.join(', ')}` });
+			const nReports = reports.meta?.changes ?? 0;
+			const nRecords = records.meta?.changes ?? 0;
+			const nLogs = logs.meta?.changes ?? 0;
+			console.log(
+				`reclaim: ${nReports} report(s), ${nRecords} abuse record(s), ${nLogs} event(s), db size now ${logs.meta?.size_after ?? '?'} bytes`,
+			);
+			// Only when it actually reclaimed something. A tick that finds nothing to do is the
+			// normal case and logging it would bury the rest under 96 rows a day.
+			if (nReports || nRecords || nLogs) {
+				const parts = [];
+				if (nReports) parts.push(`${nReports} report${nReports === 1 ? '' : 's'}`);
+				if (nRecords) parts.push(`${nRecords} record${nRecords === 1 ? '' : 's'}`);
+				if (nLogs) parts.push(`${nLogs} event${nLogs === 1 ? '' : 's'}`);
+				await logEvent(env, 'reap', { detail: `expired ${parts.join(', ')}` });
+			}
+		} catch (err) {
+			// Thrown, a failed tick shows up only as an exception count in Cloudflare's analytics,
+			// since no logs are kept. So it goes in the event log, where the portal shows it.
+			// Nothing else is needed: reclamation lags safely, and the next tick retries.
+			console.log(`reclaim failed: ${err}`);
+			await logEvent(env, 'reap_error', { detail: String(err?.message || err).slice(0, 300) });
 		}
 	},
 };
